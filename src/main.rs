@@ -1,14 +1,19 @@
 mod chunk;
+mod daemon;
 mod document;
 mod embed;
 mod hierarchy;
 mod native;
+mod prepared;
 mod query;
 mod resource;
 mod retrieve;
 mod scan;
+mod scoring;
+mod simd;
 mod store;
 mod vector;
+mod wql;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -69,6 +74,8 @@ fn default_model_file() -> PathBuf {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Prepare EmbeddingGemma 2 tensor layout and tokenizer metadata for faster cold starts.
+    Prepare,
     /// Incrementally index a directory or a single file; respects gitignore.
     Index {
         path: Option<PathBuf>,
@@ -155,19 +162,73 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Compare truncated/quantized vectors against FP32 768-dim, with labeled queries.
-    Bench {
+    /// Execute a Weft Query Language (WQL) expression.
+    #[command(name = "q", alias = "wql")]
+    Q {
+        /// WQL expression, e.g. 'all("A","B") in loom top 10'
+        query: String,
         #[arg(long)]
-        queries: PathBuf,
-        #[arg(long, default_value_t = 5)]
+        json: bool,
+    },
+    /// Manage named scoped views.
+    View {
+        #[command(subcommand)]
+        action: ViewCmd,
+    },
+    /// Benchmark inference latency, WQL retrieval throughput, candidates/sec and peak memory.
+    Bench {
+        /// Optional labeled queries file for precision benchmarking; omit for in-situ system benchmark.
+        #[arg(long)]
+        queries: Option<PathBuf>,
+        #[arg(long, default_value_t = 10)]
         top: usize,
         #[arg(long)]
         json: bool,
     },
+    /// Flush/rebuild the high-speed mmap vector snapshot (vectors.bin).
+    Flush,
+    /// Run the smart daemon (auto-exits after idle timeout and runs post-session indexing).
+    Daemon {
+        /// Idle timeout in seconds before auto-indexing and exiting.
+        #[arg(long, default_value_t = 180)]
+        idle_timeout: u64,
+        /// Socket path for IPC.
+        #[arg(long, default_value = daemon::DEFAULT_SOCKET_PATH)]
+        socket: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ViewCmd {
+    /// Save a scoped directory view.
+    Set {
+        name: String,
+        path: PathBuf,
+        #[arg(long, value_parser = ["text", "path", "image", "audio", "video"])]
+        kind: Option<String>,
+    },
+    /// List all defined views.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a defined view.
+    Rm { name: String },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(&cli.command, Cmd::Prepare) {
+        let started = Instant::now();
+        let (cache, bytes) = prepared::prepare(&cli.model_file)?;
+        println!(
+            "Prepared {} ({} bytes, {:.1} ms)",
+            cache.display(),
+            bytes,
+            started.elapsed().as_secs_f64() * 1000.
+        );
+        return Ok(());
+    }
     if let Cmd::Extract {
         file,
         images_dir,
@@ -193,8 +254,17 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let mut store = Store::open(&cli.db)?;
+    let is_mutation_cmd = matches!(
+        &cli.command,
+        Cmd::Index { .. } | Cmd::Control { .. } | Cmd::View { .. } | Cmd::Flush
+    );
+    let mut store = if is_mutation_cmd {
+        Store::open(&cli.db)?
+    } else {
+        Store::open_read_only(&cli.db)?
+    };
     match &cli.command {
+        Cmd::Prepare => unreachable!("handled before opening database"),
         Cmd::Index {
             path,
             all,
@@ -509,7 +579,180 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Extract { .. } => unreachable!(),
-        Cmd::Bench { queries, top, json } => bench(&cli, &store, queries, *top, *json)?,
+        Cmd::Q { query, json } => {
+            let parsed = wql::parse_wql(query)?;
+            let (dim, enc) = config(&store)?;
+            check_backend(&store, &cli)?;
+            let socket = daemon_socket(&cli);
+
+            // File-only WQL needs no model or daemon. Each DB/model/device
+            // combination gets its own socket to avoid mixing embeddings.
+            if parsed.expr.has_text() && !daemon::DaemonClient::is_alive(&socket) {
+                spawn_daemon_silent(&cli, &socket);
+            }
+
+            let mut fallback_engine = None;
+            let response = wql::execute_wql(&parsed, &store, dim, enc, &mut |text| {
+                // 1. Try smart daemon IPC.
+                //    try_embed_wait polls for up to 15s while daemon loads the model.
+                //    Once the socket is bound (< 5ms after spawn), it connects immediately
+                //    and waits for the model-ready reply.
+                if let Some(res) = daemon::DaemonClient::try_embed(&socket, text) {
+                    return res;
+                }
+
+                // 2. Fallback: local in-process embedding (daemon unavailable / timed-out)
+                check_backend(&store, &cli)?;
+                if fallback_engine.is_none() {
+                    fallback_engine = Some(new_embedder(&cli)?);
+                }
+                Ok(fallback_engine
+                    .as_mut()
+                    .unwrap()
+                    .embed(
+                        &[Input {
+                            kind: "text",
+                            value: text.into(),
+                        }],
+                        "query",
+                    )?
+                    .remove(0))
+            })?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                for hit in response.hits {
+                    if hit.hit.chunk_index.is_none() {
+                        println!("{:.4}\t{}", hit.distance, hit.hit.path);
+                    } else {
+                        println!(
+                            "{:.4}\t{}:{}-{}",
+                            hit.distance, hit.hit.path, hit.hit.start_line, hit.hit.end_line
+                        );
+                    }
+                }
+            }
+        }
+        Cmd::View { action } => match action {
+            ViewCmd::Set { name, path, kind } => {
+                let canonical = path
+                    .canonicalize()
+                    .with_context(|| format!("path does not exist: {}", path.display()))?;
+                store.set_view(name, &canonical.to_string_lossy(), kind.as_deref())?;
+                println!("saved view '{}' -> {}", name, canonical.display());
+            }
+            ViewCmd::List { json } => {
+                let views = store.list_views()?;
+                if *json {
+                    let items: Vec<_> = views
+                        .into_iter()
+                        .map(|(name, path, kind)| {
+                            serde_json::json!({
+                                "name": name,
+                                "path": path,
+                                "kind": kind,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&items)?);
+                } else {
+                    for (name, path, kind) in views {
+                        println!(
+                            "{}\t{}{}",
+                            name,
+                            path,
+                            kind.map(|k| format!("\t(kind: {k})")).unwrap_or_default()
+                        );
+                    }
+                }
+            }
+            ViewCmd::Rm { name } => {
+                if store.delete_view(name)? {
+                    println!("removed view '{name}'");
+                } else {
+                    bail!("view '{name}' not found");
+                }
+            }
+        },
+        Cmd::Bench { queries, top, json } => bench(&cli, &store, queries.as_deref(), *top, *json)?,
+        Cmd::Flush => {
+            let (dim, enc) = config(&store)?;
+            if enc != Encoding::Q8 {
+                bail!("flush only supported for Q8 indexes");
+            }
+            let n = store.flush_vectors_bin(dim)?;
+            println!("flushed {n} chunks to {}", store.vec_path.display());
+        }
+        Cmd::Daemon {
+            idle_timeout,
+            socket,
+        } => {
+            let (dim, enc) = config(&store)?;
+            check_backend(&store, &cli)?;
+
+            // ── Phase 1: bind socket BEFORE model loading so clients can connect immediately ──
+            let server = daemon::DaemonServer::new(
+                socket.clone(),
+                std::time::Duration::from_secs(*idle_timeout),
+            );
+            let listener = server.bind()?;
+
+            // ── Phase 2: load model (clients are queued in the OS accept backlog) ──
+            let mut engine = new_embedder(&cli)?;
+
+            // ── Phase 3: serve (drains backlog + enters normal loop) ──
+            let store_db = cli.db.clone();
+            server.serve(
+                listener,
+                |text| {
+                    Ok(engine
+                        .embed(
+                            &[Input {
+                                kind: "text",
+                                value: text.into(),
+                            }],
+                            "query",
+                        )?
+                        .remove(0))
+                },
+                move || {
+                    let mut s = Store::open(&store_db)?;
+                    let views = s.list_views()?;
+                    let mut indexed_any = false;
+                    for (name, path_str, _) in views {
+                        let path = PathBuf::from(path_str);
+                        if path.exists() {
+                            eprintln!(
+                                "weft daemon: idle auto-indexing view '{name}' ({})",
+                                path.display()
+                            );
+                            if let Ok(()) = index(
+                                &cli,
+                                &mut s,
+                                &path,
+                                dim,
+                                enc,
+                                false,
+                                true,
+                                1100,
+                                2,
+                                false,
+                                false,
+                                &[],
+                                false,
+                                100,
+                            ) {
+                                indexed_any = true;
+                            }
+                        }
+                    }
+                    if indexed_any && enc == Encoding::Q8 {
+                        let _ = s.flush_vectors_bin(dim);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
     }
     Ok(())
 }
@@ -560,6 +803,61 @@ fn new_embedder(cli: &Cli) -> Result<Embedder> {
         &cli.bridge,
         !cli.full_modal,
     )
+}
+
+fn daemon_socket(cli: &Cli) -> PathBuf {
+    let mut h = blake3::Hasher::new();
+    for part in [cli.db.as_path(), cli.model_file.as_path()] {
+        let absolute = part
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(part));
+        h.update(absolute.to_string_lossy().as_bytes());
+        h.update(&[0]);
+    }
+    for part in [&cli.backend, &cli.model, &cli.device] {
+        h.update(part.as_bytes());
+        h.update(&[0]);
+    }
+    let hash = h.finalize().to_hex();
+    std::env::temp_dir().join(format!(
+        "weft-{}-{}.sock",
+        unsafe { libc::geteuid() },
+        &hash[..16]
+    ))
+}
+
+fn spawn_daemon_silent(cli: &Cli, socket: &Path) {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--db")
+            .arg(&cli.db)
+            .arg("--backend")
+            .arg(&cli.backend)
+            .arg("--model")
+            .arg(&cli.model)
+            .arg("--model-file")
+            .arg(&cli.model_file)
+            .arg("--device")
+            .arg(&cli.device)
+            .arg("daemon")
+            .arg("--socket")
+            .arg(socket)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    let _ = libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+        let _ = cmd.spawn();
+    }
 }
 fn show(hits: Vec<Hit>, json: bool) -> Result<()> {
     if json {
@@ -1017,6 +1315,19 @@ fn index(
     if errors > 0 {
         bail!("{errors} files failed to index");
     }
+    // Flush the mmap vector snapshot (Q8 only). This is a background-safe
+    // atomic rename, so concurrent readers of the old file are unaffected.
+    if enc == Encoding::Q8 {
+        match store.flush_vectors_bin(dim) {
+            Ok(n) => eprintln!(
+                "vectors.bin: wrote {n} chunks → {}",
+                store.vec_path.display()
+            ),
+            Err(e) => eprintln!(
+                "warning: could not write vectors.bin ({e}); search will fall back to SQLite"
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -1026,7 +1337,264 @@ struct BenchmarkQuery {
     relevant: Vec<String>,
 }
 
-fn bench(cli: &Cli, store: &Store, path: &Path, top: usize, json: bool) -> Result<()> {
+fn bench(cli: &Cli, store: &Store, path: Option<&Path>, top: usize, json: bool) -> Result<()> {
+    if let Some(path) = path {
+        return bench_reference_queries(cli, store, path, top, json);
+    }
+    bench_comprehensive(cli, store, top, json)
+}
+
+fn get_peak_rss_mb() -> f64 {
+    #[cfg(unix)]
+    unsafe {
+        let mut rusage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut rusage) == 0 {
+            #[cfg(target_os = "macos")]
+            return rusage.ru_maxrss as f64 / (1024.0 * 1024.0);
+            #[cfg(not(target_os = "macos"))]
+            return rusage.ru_maxrss as f64 / 1024.0;
+        }
+    }
+    0.0
+}
+
+fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Result<()> {
+    let (dim, enc) = config(store)?;
+    check_backend(store, cli)?;
+
+    let (indexed_files, indexed_chunks, vector_bytes) = store.stats()?;
+
+    // 1. Model Loading / Initialization
+    let load_start = Instant::now();
+    let mut engine = new_embedder(cli)?;
+    let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+
+    // 2. Cold Inference
+    let cold_start = Instant::now();
+    let _ = engine.embed(
+        &[Input {
+            kind: "text",
+            value: "콜드 스타트 웜업 질의".into(),
+        }],
+        "query",
+    )?;
+    let cold_infer_ms = cold_start.elapsed().as_secs_f64() * 1000.0;
+
+    // 3. Short Warm Queries (5 runs for stable p50)
+    let short_text = "재시도 백오프 알고리즘 구현";
+    let mut short_times = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let s = Instant::now();
+        let _ = engine.embed(
+            &[Input {
+                kind: "text",
+                value: short_text.into(),
+            }],
+            "query",
+        )?;
+        short_times.push(s.elapsed().as_secs_f64() * 1000.0);
+    }
+    short_times.sort_by(|a, b| a.total_cmp(b));
+    let short_p50 = short_times[2];
+    let short_min = short_times[0];
+    let short_max = short_times[4];
+
+    // 4. Medium Query (~150 chars)
+    let medium_text = "소프트웨어 아키텍처에서 대규모 분산 시스템의 네트워크 단절 및 일시적 장애를 복구하기 위한 지수 백오프 기반의 재시도 정책 및 서킷 브레이커 패턴";
+    let med_start = Instant::now();
+    let _ = engine.embed(
+        &[Input {
+            kind: "text",
+            value: medium_text.into(),
+        }],
+        "query",
+    )?;
+    let med_ms = med_start.elapsed().as_secs_f64() * 1000.0;
+
+    // 5. WQL Engine Retrieval Benchmarks
+    let mut embed_fn = |text: &str| -> Result<Vec<f32>> {
+        Ok(engine
+            .embed(
+                &[Input {
+                    kind: "text",
+                    value: text.into(),
+                }],
+                "query",
+            )?
+            .remove(0))
+    };
+
+    // Query A: Single text
+    let q_a = wql::parse_wql(&format!(r#""재시도" top {top}"#))?;
+    let start_a = Instant::now();
+    let res_a = wql::execute_wql(&q_a, store, dim, enc, &mut embed_fn)?;
+    let time_a_ms = start_a.elapsed().as_secs_f64() * 1000.0;
+    let rate_a = (res_a.evaluated_candidates as f64) / (time_a_ms / 1000.0).max(1e-6);
+
+    // Query B: Compound All (2 branches)
+    let q_b = wql::parse_wql(&format!(r#"all("재시도", "백오프") top {top}"#))?;
+    let start_b = Instant::now();
+    let res_b = wql::execute_wql(&q_b, store, dim, enc, &mut embed_fn)?;
+    let time_b_ms = start_b.elapsed().as_secs_f64() * 1000.0;
+    let rate_b = (res_b.evaluated_candidates as f64) / (time_b_ms / 1000.0).max(1e-6);
+
+    // Query C: Complex Nested (Any + All + Avoid)
+    let q_c = wql::parse_wql(&format!(
+        r#"any( all("재시도","백오프"), avoid("모델 라우팅","테스트 구현") ) top {top}"#
+    ))?;
+    let start_c = Instant::now();
+    let res_c = wql::execute_wql(&q_c, store, dim, enc, &mut embed_fn)?;
+    let time_c_ms = start_c.elapsed().as_secs_f64() * 1000.0;
+    let rate_c = (res_c.evaluated_candidates as f64) / (time_c_ms / 1000.0).max(1e-6);
+
+    // Benchmark the same memory-mapped path as live retrieval. Avoid loading
+    // a duplicate heap copy of every vector, which skewed latency and peak RSS.
+    let warm_scan_a = if enc == Encoding::Q8 {
+        if let Ok(cache) = store.load_mmap_cache(dim) {
+            let compiled_a = wql::compile_wql(&q_a.expr, dim, &mut embed_fn, &mut |p| {
+                store.document_vector(&p.to_string_lossy(), enc, dim)
+            })?;
+            // The mapped pages and CPU clock can be cold after Metal inference.
+            // Report a warmed, repeatable scan + per-file Top-K measurement.
+            for _ in 0..2 {
+                std::hint::black_box(cache.scan_wql_unfiltered(&compiled_a, top, true));
+            }
+            let mut samples = [0f64; 11];
+            for sample in &mut samples {
+                let s = Instant::now();
+                std::hint::black_box(cache.scan_wql_unfiltered(&compiled_a, top, true));
+                *sample = s.elapsed().as_secs_f64() * 1000.0;
+            }
+            samples.sort_by(f64::total_cmp);
+            Some((samples[5], samples[9], samples[0], cache.count))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let peak_rss_mb = get_peak_rss_mb();
+
+    if json {
+        let out = serde_json::json!({
+            "device": cli.device,
+            "backend": cli.backend,
+            "dim": dim,
+            "encoding": enc.name(),
+            "indexed_files": indexed_files,
+            "indexed_chunks": indexed_chunks,
+            "vector_bytes": vector_bytes,
+            "peak_rss_mb": peak_rss_mb,
+            "inference": {
+                "model_load_ms": load_ms,
+                "cold_infer_ms": cold_infer_ms,
+                "short_query_p50_ms": short_p50,
+                "short_query_min_ms": short_min,
+                "short_query_max_ms": short_max,
+                "medium_query_ms": med_ms,
+            },
+            "wql_retrieval": {
+                "single_text": {
+                    "branches": res_a.compiled_branches,
+                    "elapsed_ms": time_a_ms,
+                    "pure_simd_ms": warm_scan_a.map(|(p50, _, _, _)| p50),
+                    "mmap_scan_p50_ms": warm_scan_a.map(|(p50, _, _, _)| p50),
+                    "mmap_scan_p90_ms": warm_scan_a.map(|(_, p90, _, _)| p90),
+                    "mmap_scan_min_ms": warm_scan_a.map(|(_, _, min, _)| min),
+                    "mmap_scan_candidates": warm_scan_a.map(|(_, _, _, count)| count),
+                    "evaluated_candidates": res_a.evaluated_candidates,
+                    "candidates_per_sec": rate_a,
+                    "top_hits": res_a.hits.len(),
+                },
+                "all_2branch": {
+                    "branches": res_b.compiled_branches,
+                    "elapsed_ms": time_b_ms,
+                    "evaluated_candidates": res_b.evaluated_candidates,
+                    "candidates_per_sec": rate_b,
+                    "top_hits": res_b.hits.len(),
+                },
+                "nested_any_avoid": {
+                    "branches": res_c.compiled_branches,
+                    "elapsed_ms": time_c_ms,
+                    "evaluated_candidates": res_c.evaluated_candidates,
+                    "candidates_per_sec": rate_c,
+                    "top_hits": res_c.hits.len(),
+                }
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("============================================================");
+        println!("              WEFT ENGINE PERFORMANCE BENCHMARK             ");
+        println!("============================================================");
+        println!(
+            "Device: {:<12} Backend: {:<8} Encoding: {} ({}d)",
+            cli.device,
+            cli.backend,
+            enc.name(),
+            dim
+        );
+        println!(
+            "Dataset: {} files / {} chunks (Q8: {:.2} MB)",
+            indexed_files,
+            indexed_chunks,
+            vector_bytes as f64 / (1024.0 * 1024.0)
+        );
+        println!("Memory Peak RSS: {:.2} MiB", peak_rss_mb);
+        println!("------------------------------------------------------------");
+        println!("▶ [Embedding Inference Latency]");
+        println!("  Model Load:              {:>8.2} ms", load_ms);
+        println!("  Cold Inference:          {:>8.2} ms", cold_infer_ms);
+        println!(
+            "  Short Query (Warm p50):  {:>8.2} ms  (min: {:.2}ms, max: {:.2}ms)",
+            short_p50, short_min, short_max
+        );
+        println!("  Medium Query (Warm):     {:>8.2} ms", med_ms);
+        println!("------------------------------------------------------------");
+        let has_mmap = store.load_mmap_cache(dim).is_ok();
+        println!(
+            "▶ [WQL Scan & Retrieval Throughput]  (mmap: {})",
+            if has_mmap {
+                "active"
+            } else {
+                "none (fallback)"
+            }
+        );
+        println!("  1. Single Text (\"재시도\"):");
+        if let Some((p50, p90, min, scanned)) = warm_scan_a {
+            let scan_rate = (scanned as f64) / (p50 / 1000.0).max(1e-6);
+            println!(
+                "     Warm mmap scan+TopK:  {:>7.2} ms p50 (min: {:.2}, p90: {:.2}) | Scanned: {} | {:.0} cands/sec",
+                p50, min, p90, scanned, scan_rate
+            );
+        }
+        println!(
+            "     E2E DB+Scan Latency:   {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
+            time_a_ms, res_a.evaluated_candidates, rate_a
+        );
+        println!("  2. all(\"재시도\",\"백오프\"):");
+        println!(
+            "     E2E DB+Scan Latency:   {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
+            time_b_ms, res_b.evaluated_candidates, rate_b
+        );
+        println!("  3. any(all(), avoid()):");
+        println!(
+            "     E2E DB+Scan Latency:   {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
+            time_c_ms, res_c.evaluated_candidates, rate_c
+        );
+        println!("============================================================");
+    }
+    Ok(())
+}
+
+fn bench_reference_queries(
+    cli: &Cli,
+    store: &Store,
+    path: &Path,
+    top: usize,
+    json: bool,
+) -> Result<()> {
     let (dim, enc) = config(store)?;
     check_backend(store, cli)?;
     if dim != 768 || enc != Encoding::F32 {

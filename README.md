@@ -6,6 +6,8 @@ A local file explorer for agents: locate relevant folders, choose files, and ret
 
 The engine combines in-process EmbeddingGemma 2 inference, incremental indexing and exact cosine vector search. Candle supplies CPU, CUDA and Metal kernels. The index stores vectors, paths, hashes and line ranges without copying source text; native text inference needs no Python or server.
 
+See the [MacBook Pro M4 Pro (24 GB) performance measurements](eval/M4PRO_PERFORMANCE_2026-10-12.md) for a seven-run, old-vs-optimized benchmark of model loading, memory, and exact mmap retrieval.
+
 ## Skill-first installation
 
 Install the complete `.agents/skills/weft-semantic-search` directory in your agent's skill directory, including `scripts` and `references`. From this checkout:
@@ -46,7 +48,7 @@ Supported UTF-8 text up to 2 MiB is embedded by overlapping chunks. Supported PD
 
 The initial scan's progress is in `weft stats --json`, with details in `~/.local/share/myvec/index.log`. A scan reports `complete` or `partial` after it exits; a `running` last scan with `indexer_running=false` was interrupted. Results already written are searchable while indexing continues. SQLite WAL supports concurrent searches; only one indexer can update a database at once. Rerun indexing to pick up changes; no persistent watcher is installed. Each run hashes supported text and uses size/modified time for filename-only records. Unchanged files are not re-embedded. `--prune` removes disappeared records only after an error-free scan.
 
-GPU use during the initial scan is expected with the Metal/CUDA build: files are embedded locally in the background. The worker exits when the scan finishes; there is no always-running GPU service. On Unix, stop a worker with `kill -INT PID`, using `last_scan.pid` from stats after confirming `indexer_running=true`. Restart with `weft --device cpu index --all --background` to use CPU instead, or omit `--device cpu` to resume GPU indexing. Committed files are reused.
+GPU use during the initial scan is expected with the Metal/CUDA build: files are embedded locally in the background. The indexing worker exits when the scan finishes. The optional WQL query daemon keeps the model loaded for an idle period (default 180 seconds) and then exits. On Unix, stop an indexing worker with `kill -INT PID`, using `last_scan.pid` from stats after confirming `indexer_running=true`. Restart with `weft --device cpu index --all --background` to use CPU instead, or omit `--device cpu` to resume GPU indexing. Committed files are reused.
 
 Reload your agent session after installing the skill if it does not appear yet. The skill lets the agent query the same CLI and read matching source lines. It does not grant permission to expand a future user's indexing scope.
 
@@ -76,7 +78,7 @@ weft retrieve "database" --diversity 0.5 --dedup-cosine 0.98 --pool 100 --json
 
 `retrieve` is the primary multi-basis vector search interface. It combines text and indexed-file criteria directly, without requiring set definitions or intermediate top-K lists. Each eligible chunk is scored against **every** criterion before selecting candidates. File criteria use stored chunk centroids, exclude reference files from results, and need no embedding model. Text criteria share one model instance per call. File criteria represent the indexed version; reindex references if they have changed.
 
-For normalized reconstructed candidate vectors, let `d(C,A) = 1 - cosine(C,A)`. Positive combination options are `--combine all` (default, sum of distances), `any` (minimum distance) and `strict` (maximum distance). With negative examples, subtract `--avoid-weight` times the minimum distance to a negative example, default weight 1. A candidate far from **all** negative examples gets a larger subtraction. These are ranking preferences, not Boolean exclusions or entailment tests. Composite distance may be negative, and smaller is better. More positive criteria increase the sum's scale; tune the negative weight accordingly. `--exclude PATH` and `--under PATH` are hard path filters applied before scoring. `--max-distance` optionally caps composite distance.
+For normalized reconstructed candidate vectors, let `d(C,A) = 1 - cosine(C,A)`. Positive combination options are `--combine all` (default, sum of distances), `any` (minimum distance), `strict` (maximum distance), and `bridge` (an explicit name for maximum positive distance, i.e. maximum weakest similarity). With negative examples, subtract `--avoid-weight` times the minimum distance to a negative example, default weight 1. A candidate far from **all** negative examples gets a larger subtraction. These are ranking preferences, not Boolean exclusions or entailment tests. Composite distance may be negative, and smaller is better. More positive criteria increase the sum's scale; tune the negative weight accordingly. `--exclude PATH` and `--under PATH` are hard path filters applied before scoring. `--max-distance` optionally caps composite distance.
 
 The default keeps one best matching chunk per file. `--chunks` allows several evidence chunks from the same file. Exact composite-score top-K selection scans all eligible chunks and uses bounded candidate memory. There is no per-criterion top-K cutoff. The stored vectors are still Q8 by default; "exact" refers to ranking those reconstructed vectors, not equivalence to an unquantized model.
 
@@ -169,6 +171,19 @@ cargo build --release --features cuda  # NVIDIA GPU; requires CUDA toolkit/nvcc
 The native backend is the default. `--device auto` tries compiled GPU backends then CPU. Select `--device cpu`, `--device cuda:0`, or `--device metal:0` explicitly to fail if that device is unavailable. `--device mps` is an alias for direct Metal execution; it does not use the PyTorch MPS runtime. CPU and Metal have been executed on this Mac; CUDA is wired through Candle but has not been built or run on NVIDIA hardware here.
 
 `--model-file` selects a local `gemma-embedding2` GGUF. Quantized weights and the tokenizer are read directly from the same file, with no converted model or separate tokenizer copy. The runtime currently accepts at most 2,048 tokens including the search/document prefix and BOS/EOS; longer input fails instead of being silently truncated. This is a runtime limit, not the full model context limit.
+
+## Prepared model and repeated queries
+
+```sh
+weft prepare                      # once per GGUF update; writes a *.gguf.weft-layout cache
+weft q 'all("Transformer", "GPU optimization") top 10' --json
+weft q 'avoid("database migration", "backup restore") top 10' --json
+weft --device metal --db /path/to/index.sqlite bench --json
+```
+
+`prepare` caches the fixed model's tensor layout and tokenizer metadata in a versioned sidecar (not the weights). Subsequent native loads validate the sidecar, mmap the original GGUF and construct the Metal/CPU tensors. A missing, stale or invalid sidecar falls back to normal GGUF parsing. This avoids repeated metadata parsing, but does not eliminate Metal initialization or moving weights to device memory. The binary deliberately does not embed the ~296 MiB weight file.
+
+`q` accepts WQL expressions (`all`, `any`, `avoid`, `file`, `in VIEW`, `level`, `top`). Text queries automatically start or reuse a short-lived local Unix-socket embedding daemon keyed to the selected index, model and device. File-only queries skip inference entirely. Its default 180-second idle expiration can optionally refresh explicitly registered views before exiting; use `weft view list` to inspect them. Plain `retrieve`/`search` stay single-process. On Unix, the daemon socket is restricted to the current user. Exact SIMD/Q8 retrieval uses the mmap vector snapshot where available; indexing refreshes it and `weft flush` rebuilds it explicitly.
 
 Then index and search:
 

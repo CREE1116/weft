@@ -1,12 +1,15 @@
 use crate::vector::{Encoding, pack, similarity};
 use anyhow::{Context, Result, bail};
+use memmap2::Mmap;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub type PackedChunk = (usize, usize, Vec<u8>, Option<[u8; 32]>);
 
 pub struct Store {
     pub conn: Connection,
+    /// Path to the companion mmap vector cache file (empty = disabled, e.g. :memory:).
+    pub vec_path: PathBuf,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -31,6 +34,8 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
+            PRAGMA cache_size = -16000; PRAGMA mmap_size = 268435456;
+            PRAGMA temp_store = MEMORY;
             CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, hash TEXT NOT NULL,
@@ -40,6 +45,9 @@ impl Store {
                 doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
                 ordinal INTEGER NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL,
                 embedding BLOB NOT NULL, PRIMARY KEY (doc_id, ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS views (
+                name TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT
             );",
         )?;
         // Additive migration: legacy vectors remain readable and legacy writers
@@ -56,8 +64,45 @@ impl Store {
             tx.execute("ALTER TABLE chunks ADD COLUMN input_hash BLOB", [])?;
         }
         tx.commit()?;
-        Ok(Self { conn })
+        // Derive the companion mmap vector cache path next to the sqlite file.
+        // e.g. ~/.local/share/myvec/index.sqlite → index.sqlite.vectors.bin
+        // For :memory: or empty paths the cache is disabled (vec_path stays empty).
+        let vec_path = if path.as_os_str() == ":memory:" || path.as_os_str().is_empty() {
+            PathBuf::new()
+        } else {
+            let mut s = path.as_os_str().to_owned();
+            s.push(".vectors.bin");
+            PathBuf::from(s)
+        };
+        Ok(Self { conn, vec_path })
     }
+
+    /// Open in read-only mode with zero write locks. Never blocks on concurrent indexers.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        if !path.exists() && path.as_os_str() != ":memory:" {
+            return Self::open(path);
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("opening read-only {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_millis(500))?;
+        let _ = conn.execute_batch(
+            "PRAGMA cache_size = -16000; PRAGMA mmap_size = 268435456;
+             PRAGMA query_only = ON; PRAGMA read_uncommitted = ON;",
+        );
+
+        let vec_path = if path.as_os_str() == ":memory:" || path.as_os_str().is_empty() {
+            PathBuf::new()
+        } else {
+            let mut s = path.as_os_str().to_owned();
+            s.push(".vectors.bin");
+            PathBuf::from(s)
+        };
+        Ok(Self { conn, vec_path })
+    }
+
     pub fn set_setting(&self, name: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO settings(name,value) VALUES (?1,?2)
@@ -162,6 +207,15 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
     pub fn hits(&self, query: &[f32], encoding: Encoding, limit: usize) -> Result<Vec<Hit>> {
+        // The mmap snapshot is the hot path for the normal semantic search.
+        // SQLite remains the source of truth and fallback for legacy indexes.
+        if encoding == Encoding::Q8 {
+            if let Some(dim) = self.setting("dim")?.and_then(|v| v.parse::<usize>().ok()) {
+                if let Ok(cache) = self.load_mmap_cache(dim) {
+                    return Ok(cache.scan_single(query, limit, true));
+                }
+            }
+        }
         self.rank_by(
             limit,
             true,
@@ -174,8 +228,21 @@ impl Store {
         &self,
         limit: usize,
         per_file: bool,
-        mut accept: impl FnMut(&str, &str) -> bool,
+        accept: impl FnMut(&str, &str) -> bool,
         mut score_blob: impl FnMut(&[u8]) -> Result<f32>,
+    ) -> Result<Vec<Hit>> {
+        self.rank_bounded(limit, per_file, accept, |blob, _| {
+            score_blob(blob).map(Some)
+        })
+    }
+    /// The cutoff is a monotone exact-score lower bound. A scorer may return
+    /// None only when its outward upper bound is strictly below this cutoff.
+    pub fn rank_bounded(
+        &self,
+        limit: usize,
+        per_file: bool,
+        mut accept: impl FnMut(&str, &str) -> bool,
+        mut score_blob: impl FnMut(&[u8], Option<f32>) -> Result<Option<f32>>,
     ) -> Result<Vec<Hit>> {
         use std::{cmp::Reverse, collections::BinaryHeap};
         if limit == 0 {
@@ -204,7 +271,7 @@ impl Store {
             }
         }
         let mut heap: BinaryHeap<Reverse<Ranked>> = BinaryHeap::new();
-        let mut keep = |hit: Hit| {
+        let keep = |heap: &mut BinaryHeap<Reverse<Ranked>>, hit: Hit| {
             let item = Reverse(Ranked(hit));
             if heap.len() < limit {
                 heap.push(item);
@@ -226,37 +293,54 @@ impl Store {
             let id: i64 = row.get(0)?;
             if current_id != Some(id) {
                 if let Some(hit) = best.take() {
-                    keep(hit);
+                    keep(&mut heap, hit);
                 }
                 current_id = Some(id);
             }
-            let path: String = row.get(1)?;
-            let kind: String = row.get(2)?;
-            if !accept(&path, &kind) {
+            let path_ref = row.get_ref(1)?.as_str()?;
+            let kind_ref = row.get_ref(2)?.as_str()?;
+            if !accept(path_ref, kind_ref) {
                 continue;
             }
-            let blob: Vec<u8> = row.get(5)?;
-            let score = score_blob(&blob)?;
+            let blob_ref = row.get_ref(5)?.as_blob()?;
+            let cutoff = if heap.len() == limit {
+                heap.peek().map(|worst| worst.0.0.score)
+            } else {
+                None
+            };
+            let cutoff = if per_file {
+                best.as_ref()
+                    .map(|old| cutoff.map_or(old.score, |c| c.max(old.score)))
+                    .or(cutoff)
+            } else {
+                cutoff
+            };
+            let Some(score) = score_blob(blob_ref, cutoff)? else {
+                continue;
+            };
             if !score.is_finite() {
                 bail!("nonfinite retrieval score");
             }
+            if per_file && best.as_ref().is_some_and(|old| score <= old.score) {
+                continue;
+            }
             let hit = Hit {
-                line_kind: crate::document::line_kind(&path, &kind),
-                path,
-                kind,
+                line_kind: crate::document::line_kind(path_ref, kind_ref),
+                path: path_ref.to_owned(),
+                kind: kind_ref.to_owned(),
                 score,
                 start_line: row.get::<_, i64>(3)? as usize,
                 end_line: row.get::<_, i64>(4)? as usize,
                 chunk_index: Some(row.get::<_, i64>(6)? as usize),
             };
             if !per_file {
-                keep(hit);
-            } else if best.as_ref().is_none_or(|old| score > old.score) {
+                keep(&mut heap, hit);
+            } else {
                 best = Some(hit);
             }
         }
         if let Some(hit) = best {
-            keep(hit);
+            keep(&mut heap, hit);
         }
         let mut hits: Vec<_> = heap.into_iter().map(|item| item.0.0).collect();
         hits.sort_by(|a, b| {
@@ -368,6 +452,46 @@ impl Store {
         }
         crate::vector::normalized_prefix(&sum, dim)
     }
+
+    pub fn set_view(&self, name: &str, path: &str, kind: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO views (name, path, kind) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET path=excluded.path, kind=excluded.kind",
+            params![name, path, kind],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_view(&self, name: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM views WHERE name = ?1")?;
+        let mut rows = stmt.query([name])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_views(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, path, kind FROM views ORDER BY name")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let mut views = Vec::new();
+        for r in rows {
+            views.push(r?);
+        }
+        Ok(views)
+    }
+
+    pub fn delete_view(&self, name: &str) -> Result<bool> {
+        let count = self
+            .conn
+            .execute("DELETE FROM views WHERE name = ?1", [name])?;
+        Ok(count > 0)
+    }
     pub fn vectors(&self) -> Result<Vec<(String, Vec<f32>)>> {
         if self.setting("encoding")?.as_deref() != Some("f32") {
             bail!("benchmark needs a --encoding f32 baseline index");
@@ -387,6 +511,715 @@ impl Store {
         }
         Ok(out)
     }
+
+    pub fn load_flat_cache(&self, dim: usize) -> Result<FlatVectorCache> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id, d.path, d.kind, c.start_line, c.end_line, c.embedding, c.ordinal
+             FROM chunks c JOIN documents d ON d.id=c.doc_id ORDER BY c.doc_id, c.ordinal",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut cache = FlatVectorCache {
+            count: 0,
+            dim,
+            doc_ids: Vec::new(),
+            ordinals: Vec::new(),
+            scales: Vec::new(),
+            paths: Vec::new(),
+            kinds: Vec::new(),
+            start_lines: Vec::new(),
+            end_lines: Vec::new(),
+            quantized_bytes: Vec::new(),
+        };
+
+        while let Some(row) = rows.next()? {
+            let blob_ref = row.get_ref(5)?.as_blob()?;
+            if blob_ref.len() != dim + 4 {
+                continue;
+            }
+            let scale = f32::from_le_bytes(blob_ref[..4].try_into().unwrap());
+            let q8_slice = &blob_ref[4..];
+
+            cache.doc_ids.push(row.get(0)?);
+            cache.paths.push(row.get(1)?);
+            cache.kinds.push(row.get(2)?);
+            cache.start_lines.push(row.get::<_, i64>(3)? as u32);
+            cache.end_lines.push(row.get::<_, i64>(4)? as u32);
+            cache.scales.push(scale);
+            cache.ordinals.push(row.get::<_, i64>(6)? as u32);
+            cache.quantized_bytes.extend_from_slice(q8_slice);
+            cache.count += 1;
+        }
+
+        Ok(cache)
+    }
+
+    // -----------------------------------------------------------------------
+    // Persistent mmap vector cache (vectors.bin)
+    // -----------------------------------------------------------------------
+
+    /// Write a compact binary snapshot of all Q8 embeddings to `vec_path`
+    /// (adjacent to the sqlite file as `<db>.vectors.bin`).
+    ///
+    /// Format:
+    ///   Header  24 B: magic(8) + count(4) + dim(4) + string_pool_size(4) + pad(4)
+    ///   Rows  N×32 B: doc_id(8) + ordinal(4) + start_line(4) + end_line(4)
+    ///                  + scale(4) + path_off(4) + kind_off(4)
+    ///   String pool: null-terminated path and kind strings packed together
+    ///   Vectors N×dim B: raw Q8 bytes for SIMD direct access
+    ///
+    /// The file is written atomically via a temp-file + rename.
+    pub fn flush_vectors_bin(&self, dim: usize) -> Result<usize> {
+        if self.vec_path.as_os_str().is_empty() {
+            return Ok(0); // disabled for :memory:
+        }
+        use std::io::Write;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id, d.path, d.kind, c.start_line, c.end_line, c.embedding, c.ordinal
+             FROM chunks c JOIN documents d ON d.id=c.doc_id ORDER BY c.doc_id, c.ordinal",
+        )?;
+        let mut rows = stmt.query([])?;
+
+        struct Row {
+            doc_id: i64,
+            path: String,
+            kind: String,
+            start_line: u32,
+            end_line: u32,
+            ordinal: u32,
+            scale: f32,
+        }
+
+        let mut meta: Vec<Row> = Vec::new();
+        // Collect raw Q8 bytes in one contiguous buffer to avoid many small allocations.
+        let mut all_q8: Vec<u8> = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let blob = row.get_ref(5)?.as_blob()?;
+            if blob.len() != dim + 4 {
+                continue;
+            }
+            let scale = f32::from_le_bytes(blob[..4].try_into().unwrap());
+            all_q8.extend_from_slice(&blob[4..]);
+            meta.push(Row {
+                doc_id: row.get(0)?,
+                path: row.get(1)?,
+                kind: row.get(2)?,
+                start_line: row.get::<_, i64>(3)? as u32,
+                end_line: row.get::<_, i64>(4)? as u32,
+                ordinal: row.get::<_, i64>(6)? as u32,
+                scale,
+            });
+        }
+
+        let count = meta.len();
+
+        // Build interleaved string pool (path0\0kind0\0path1\0kind1\0…)
+        let mut pool: Vec<u8> = Vec::new();
+        let mut path_offs: Vec<u32> = Vec::with_capacity(count);
+        let mut kind_offs: Vec<u32> = Vec::with_capacity(count);
+        for r in &meta {
+            path_offs.push(pool.len() as u32);
+            pool.extend_from_slice(r.path.as_bytes());
+            pool.push(0);
+            kind_offs.push(pool.len() as u32);
+            pool.extend_from_slice(r.kind.as_bytes());
+            pool.push(0);
+        }
+        let pool_size = pool.len() as u32;
+
+        // Write to a temp file first, then rename for atomicity.
+        let mut tmp = self.vec_path.clone();
+        tmp.as_mut_os_string().push(".tmp");
+        {
+            let mut f =
+                std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+
+            // Header (24 bytes)
+            f.write_all(b"WEFTVEC1")?;
+            f.write_all(&(count as u32).to_le_bytes())?;
+            f.write_all(&(dim as u32).to_le_bytes())?;
+            f.write_all(&pool_size.to_le_bytes())?;
+            f.write_all(&0u32.to_le_bytes())?; // pad
+
+            // Row table (count × 32 bytes)
+            for (i, r) in meta.iter().enumerate() {
+                f.write_all(&r.doc_id.to_le_bytes())?;
+                f.write_all(&r.ordinal.to_le_bytes())?;
+                f.write_all(&r.start_line.to_le_bytes())?;
+                f.write_all(&r.end_line.to_le_bytes())?;
+                f.write_all(&r.scale.to_le_bytes())?;
+                f.write_all(&path_offs[i].to_le_bytes())?;
+                f.write_all(&kind_offs[i].to_le_bytes())?;
+            }
+
+            // String pool
+            f.write_all(&pool)?;
+
+            // Vectors (count × dim bytes, Q8 raw)
+            f.write_all(&all_q8)?;
+            f.flush()?;
+        }
+        std::fs::rename(&tmp, &self.vec_path)
+            .with_context(|| format!("rename vectors.bin: {}", self.vec_path.display()))?;
+
+        Ok(count)
+    }
+
+    /// Open the companion `vectors.bin` as a memory-mapped read-only view.
+    /// Returns an error if the file does not exist, is stale (wrong dim), or is corrupt.
+    pub fn load_mmap_cache(&self, dim: usize) -> Result<MmapVectorCache> {
+        if self.vec_path.as_os_str().is_empty() {
+            bail!("mmap cache disabled for in-memory store");
+        }
+        let file = std::fs::File::open(&self.vec_path)
+            .with_context(|| format!("open {}", self.vec_path.display()))?;
+        let mmap = unsafe { Mmap::map(&file) }?;
+        MmapVectorCache::parse(mmap, dim)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent mmap vector cache implementation
+// ---------------------------------------------------------------------------
+
+const MMAP_MAGIC: &[u8; 8] = b"WEFTVEC1";
+const MMAP_HEADER_SIZE: usize = 24;
+const MMAP_ROW_SIZE: usize = 32;
+
+/// Zero-copy view into `vectors.bin` via OS memory mapping.
+///
+/// Keeps the `Mmap` alive (so the OS page mapping stays live) and exposes
+/// per-chunk accessors that read directly from the mapped pages — no heap
+/// copying. When the file is in the kernel's page cache (common after the
+/// first search), reads are essentially L3/RAM speed.
+pub struct MmapVectorCache {
+    _mmap: Mmap,
+    pub count: usize,
+    pub dim: usize,
+    rows_off: usize,
+    pool_off: usize,
+    vecs_off: usize,
+}
+
+impl MmapVectorCache {
+    fn parse(mmap: Mmap, dim: usize) -> Result<Self> {
+        if mmap.len() < MMAP_HEADER_SIZE {
+            bail!("vectors.bin too small ({} bytes)", mmap.len());
+        }
+        if &mmap[..8] != MMAP_MAGIC {
+            bail!("vectors.bin: bad magic — rebuild with `weft index`");
+        }
+        let count = u32::from_le_bytes(mmap[8..12].try_into().unwrap()) as usize;
+        let file_dim = u32::from_le_bytes(mmap[12..16].try_into().unwrap()) as usize;
+        let pool_size = u32::from_le_bytes(mmap[16..20].try_into().unwrap()) as usize;
+
+        if file_dim != dim {
+            bail!("vectors.bin dim={file_dim} != index dim={dim} — rebuild with `weft index`");
+        }
+
+        let rows_off = MMAP_HEADER_SIZE;
+        let pool_off = rows_off + count * MMAP_ROW_SIZE;
+        let vecs_off = pool_off + pool_size;
+        let need = vecs_off + count * dim;
+        if mmap.len() < need {
+            bail!(
+                "vectors.bin truncated: need {need} B, have {} B — rebuild with `weft index`",
+                mmap.len()
+            );
+        }
+
+        Ok(Self {
+            _mmap: mmap,
+            count,
+            dim,
+            rows_off,
+            pool_off,
+            vecs_off,
+        })
+    }
+
+    // --- zero-copy per-row accessors ----------------------------------------
+
+    #[inline]
+    fn row(&self, i: usize) -> &[u8] {
+        let b = self.rows_off + i * MMAP_ROW_SIZE;
+        &self._mmap[b..b + MMAP_ROW_SIZE]
+    }
+
+    #[inline]
+    fn row_i64_fast(&self, i: usize) -> i64 {
+        #[cfg(target_endian = "big")]
+        {
+            return self.doc_id(i);
+        }
+        #[cfg(target_endian = "little")]
+        unsafe {
+            std::ptr::read_unaligned(
+                self._mmap.as_ptr().add(self.rows_off + i * MMAP_ROW_SIZE) as *const i64
+            )
+        }
+    }
+
+    #[inline]
+    fn row_f32_fast(&self, i: usize) -> f32 {
+        #[cfg(target_endian = "big")]
+        {
+            return self.scale(i);
+        }
+        #[cfg(target_endian = "little")]
+        unsafe {
+            std::ptr::read_unaligned(
+                self._mmap
+                    .as_ptr()
+                    .add(self.rows_off + i * MMAP_ROW_SIZE + 20) as *const f32,
+            )
+        }
+    }
+
+    #[inline]
+    pub fn doc_id(&self, i: usize) -> i64 {
+        i64::from_le_bytes(self.row(i)[0..8].try_into().unwrap())
+    }
+    #[inline]
+    pub fn ordinal(&self, i: usize) -> u32 {
+        u32::from_le_bytes(self.row(i)[8..12].try_into().unwrap())
+    }
+    #[inline]
+    pub fn start_line(&self, i: usize) -> u32 {
+        u32::from_le_bytes(self.row(i)[12..16].try_into().unwrap())
+    }
+    #[inline]
+    pub fn end_line(&self, i: usize) -> u32 {
+        u32::from_le_bytes(self.row(i)[16..20].try_into().unwrap())
+    }
+    #[inline]
+    pub fn scale(&self, i: usize) -> f32 {
+        f32::from_le_bytes(self.row(i)[20..24].try_into().unwrap())
+    }
+
+    #[inline]
+    fn str_at(&self, off: u32) -> &str {
+        let s = self.pool_off + off as usize;
+        let bytes = &self._mmap[s..];
+        let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        std::str::from_utf8(&bytes[..len]).unwrap_or("")
+    }
+
+    #[inline]
+    pub fn path(&self, i: usize) -> &str {
+        let off = u32::from_le_bytes(self.row(i)[24..28].try_into().unwrap());
+        self.str_at(off)
+    }
+
+    #[inline]
+    pub fn kind(&self, i: usize) -> &str {
+        let off = u32::from_le_bytes(self.row(i)[28..32].try_into().unwrap());
+        self.str_at(off)
+    }
+
+    #[inline]
+    pub fn q8(&self, i: usize) -> &[u8] {
+        let b = self.vecs_off + i * self.dim;
+        &self._mmap[b..b + self.dim]
+    }
+
+    // --- WQL SIMD scan (same logic as FlatVectorCache::scan_wql) -----------
+
+    pub fn scan_wql(
+        &self,
+        compiled: &crate::wql::CompiledQuery,
+        limit: usize,
+        per_file: bool,
+        accept: impl FnMut(&str, &str) -> bool,
+    ) -> Vec<Hit> {
+        self.scan_wql_impl::<true, _>(compiled, limit, per_file, accept)
+    }
+
+    /// Unscoped searches do not need to fetch and decode paths for every
+    /// document. Keep the filter decision outside the hot vector loop.
+    pub fn scan_wql_unfiltered(
+        &self,
+        compiled: &crate::wql::CompiledQuery,
+        limit: usize,
+        per_file: bool,
+    ) -> Vec<Hit> {
+        self.scan_wql_impl::<false, _>(compiled, limit, per_file, |_, _| true)
+    }
+
+    #[inline]
+    fn scan_wql_impl<const FILTERED: bool, F: FnMut(&str, &str) -> bool>(
+        &self,
+        compiled: &crate::wql::CompiledQuery,
+        limit: usize,
+        per_file: bool,
+        mut accept: F,
+    ) -> Vec<Hit> {
+        use std::collections::BinaryHeap;
+        if limit == 0 || compiled.branches.is_empty() {
+            return Vec::new();
+        }
+        struct Ri {
+            idx: usize,
+            dist: f32,
+        }
+        impl PartialEq for Ri {
+            fn eq(&self, o: &Self) -> bool {
+                self.dist == o.dist
+            }
+        }
+        impl Eq for Ri {}
+        impl PartialOrd for Ri {
+            fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+                self.dist.partial_cmp(&o.dist)
+            }
+        }
+        impl Ord for Ri {
+            fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+                self.dist.total_cmp(&o.dist)
+            }
+        }
+
+        let mut heap: BinaryHeap<Ri> = BinaryHeap::new();
+        let mut cur_id: Option<i64> = None;
+        let mut best_file: Option<(usize, f32)> = None;
+        let mut allowed = false;
+
+        let push = |heap: &mut BinaryHeap<Ri>, item: Ri| {
+            if heap.len() < limit {
+                heap.push(item);
+            } else if let Some(w) = heap.peek() {
+                if item.dist < w.dist {
+                    heap.pop();
+                    heap.push(item);
+                }
+            }
+        };
+
+        for i in 0..self.count {
+            let did = self.row_i64_fast(i);
+            if cur_id != Some(did) {
+                if let Some((bi, bd)) = best_file.take() {
+                    push(&mut heap, Ri { idx: bi, dist: bd });
+                }
+                cur_id = Some(did);
+                // A document's path and kind are constant for all of its chunks.
+                // Avoid decoding the same NUL-terminated strings for every vector.
+                if FILTERED {
+                    allowed = accept(self.path(i), self.kind(i));
+                }
+            }
+            if FILTERED && !allowed {
+                continue;
+            }
+
+            let q8 = self.q8(i);
+            let scale = self.row_f32_fast(i);
+            let mut min_dist = f32::INFINITY;
+            if let [b0, b1] = compiled.branches.as_slice() {
+                let (s0, s1) = crate::simd::q8_dot2(q8, &b0.vector, &b1.vector);
+                min_dist = (b0.bias - s0 * scale).min(b1.bias - s1 * scale);
+            } else {
+                for branch in &compiled.branches {
+                    let dot = crate::simd::q8_dot(q8, &branch.vector) * scale;
+                    let s = branch.bias - dot;
+                    if s < min_dist {
+                        min_dist = s;
+                    }
+                }
+            }
+            if !min_dist.is_finite() {
+                continue;
+            }
+
+            if per_file {
+                if best_file.as_ref().is_none_or(|(_, d)| min_dist < *d) {
+                    best_file = Some((i, min_dist));
+                }
+            } else {
+                push(
+                    &mut heap,
+                    Ri {
+                        idx: i,
+                        dist: min_dist,
+                    },
+                );
+            }
+        }
+        if let Some((bi, bd)) = best_file {
+            push(&mut heap, Ri { idx: bi, dist: bd });
+        }
+
+        let mut results: Vec<Ri> = heap.into_iter().collect();
+        results.sort_by(|a, b| a.dist.total_cmp(&b.dist));
+        results
+            .into_iter()
+            .map(|item| {
+                let i = item.idx;
+                Hit {
+                    line_kind: crate::document::line_kind(self.path(i), self.kind(i)),
+                    path: self.path(i).to_owned(),
+                    kind: self.kind(i).to_owned(),
+                    score: -item.dist,
+                    start_line: self.start_line(i) as usize,
+                    end_line: self.end_line(i) as usize,
+                    chunk_index: Some(self.ordinal(i) as usize),
+                }
+            })
+            .collect()
+    }
+
+    pub fn scan_single(&self, query: &[f32], limit: usize, per_file: bool) -> Vec<Hit> {
+        use std::{cmp::Reverse, collections::BinaryHeap};
+        if limit == 0 || query.len() != self.dim {
+            return Vec::new();
+        }
+        #[derive(Debug)]
+        struct Item<'a> {
+            idx: usize,
+            score: f32,
+            path: &'a str,
+            ordinal: u32,
+        }
+        impl PartialEq for Item<'_> {
+            fn eq(&self, o: &Self) -> bool {
+                self.cmp(o).is_eq()
+            }
+        }
+        impl Eq for Item<'_> {}
+        impl PartialOrd for Item<'_> {
+            fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+        impl Ord for Item<'_> {
+            fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+                self.score
+                    .total_cmp(&o.score)
+                    .then_with(|| o.path.cmp(self.path))
+                    .then_with(|| o.ordinal.cmp(&self.ordinal))
+            }
+        }
+
+        let mut heap = BinaryHeap::new();
+        let mut current = None;
+        let mut best: Option<(usize, f32)> = None;
+        let mut current_path = "";
+        fn push<'a>(heap: &mut BinaryHeap<Reverse<Item<'a>>>, item: Item<'a>, limit: usize) {
+            if heap.len() < limit {
+                heap.push(Reverse(item));
+            } else if heap.peek().is_some_and(|w| item > w.0) {
+                heap.pop();
+                heap.push(Reverse(item));
+            }
+        }
+        for i in 0..self.count {
+            let doc_id = self.row_i64_fast(i);
+            if current != Some(doc_id) {
+                if let Some((idx, score)) = best.take() {
+                    push(
+                        &mut heap,
+                        Item {
+                            idx,
+                            score,
+                            path: current_path,
+                            ordinal: self.ordinal(idx),
+                        },
+                        limit,
+                    );
+                }
+                current = Some(doc_id);
+                current_path = self.path(i);
+            }
+            let score = crate::simd::q8_dot(self.q8(i), query) * self.row_f32_fast(i);
+            if !score.is_finite() {
+                continue;
+            }
+            if per_file {
+                if best.as_ref().is_none_or(|x| score > x.1) {
+                    best = Some((i, score));
+                }
+            } else {
+                push(
+                    &mut heap,
+                    Item {
+                        idx: i,
+                        score,
+                        path: current_path,
+                        ordinal: self.ordinal(i),
+                    },
+                    limit,
+                );
+            }
+        }
+        if let Some((idx, score)) = best {
+            push(
+                &mut heap,
+                Item {
+                    idx,
+                    score,
+                    path: current_path,
+                    ordinal: self.ordinal(idx),
+                },
+                limit,
+            );
+        }
+        let mut out: Vec<_> = heap.into_iter().map(|x| x.0).collect();
+        out.sort_by(|a, b| b.cmp(a));
+        out.into_iter()
+            .map(|x| Hit {
+                line_kind: crate::document::line_kind(self.path(x.idx), self.kind(x.idx)),
+                path: self.path(x.idx).to_owned(),
+                kind: self.kind(x.idx).to_owned(),
+                score: x.score,
+                start_line: self.start_line(x.idx) as usize,
+                end_line: self.end_line(x.idx) as usize,
+                chunk_index: Some(self.ordinal(x.idx) as usize),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct FlatVectorCache {
+    pub count: usize,
+    pub dim: usize,
+    pub doc_ids: Vec<i64>,
+    pub ordinals: Vec<u32>,
+    pub scales: Vec<f32>,
+    pub paths: Vec<String>,
+    pub kinds: Vec<String>,
+    pub start_lines: Vec<u32>,
+    pub end_lines: Vec<u32>,
+    pub quantized_bytes: Vec<u8>,
+}
+
+impl FlatVectorCache {
+    pub fn scan_wql(
+        &self,
+        compiled: &crate::wql::CompiledQuery,
+        limit: usize,
+        per_file: bool,
+        mut accept: impl FnMut(&str, &str) -> bool,
+    ) -> Vec<Hit> {
+        use std::collections::BinaryHeap;
+        #[derive(Debug)]
+        struct RankedItem {
+            idx: usize,
+            dist: f32,
+        }
+        impl PartialEq for RankedItem {
+            fn eq(&self, other: &Self) -> bool {
+                self.dist == other.dist
+            }
+        }
+        impl Eq for RankedItem {}
+        impl PartialOrd for RankedItem {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                self.dist.partial_cmp(&other.dist)
+            }
+        }
+        impl Ord for RankedItem {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.dist.total_cmp(&other.dist)
+            }
+        }
+
+        let mut heap: BinaryHeap<RankedItem> = BinaryHeap::new();
+        let mut current_id = None;
+        let mut best_in_file: Option<(usize, f32)> = None;
+
+        let push_heap = |heap: &mut BinaryHeap<RankedItem>, item: RankedItem| {
+            if heap.len() < limit {
+                heap.push(item);
+            } else if let Some(worst) = heap.peek() {
+                if item.dist < worst.dist {
+                    heap.pop();
+                    heap.push(item);
+                }
+            }
+        };
+
+        let dim = self.dim;
+        for i in 0..self.count {
+            let doc_id = self.doc_ids[i];
+            if current_id != Some(doc_id) {
+                if let Some((b_idx, b_dist)) = best_in_file.take() {
+                    push_heap(
+                        &mut heap,
+                        RankedItem {
+                            idx: b_idx,
+                            dist: b_dist,
+                        },
+                    );
+                }
+                current_id = Some(doc_id);
+            }
+
+            if !accept(&self.paths[i], &self.kinds[i]) {
+                continue;
+            }
+
+            let q8_slice = &self.quantized_bytes[i * dim..(i + 1) * dim];
+            let scale = self.scales[i];
+
+            let mut min_dist = f32::INFINITY;
+            for branch in &compiled.branches {
+                let dot = crate::simd::q8_dot(q8_slice, &branch.vector) * scale;
+                let s = branch.bias - dot;
+                if s < min_dist {
+                    min_dist = s;
+                }
+            }
+
+            if !min_dist.is_finite() {
+                continue;
+            }
+
+            if per_file {
+                if best_in_file.as_ref().is_none_or(|(_, d)| min_dist < *d) {
+                    best_in_file = Some((i, min_dist));
+                }
+            } else {
+                push_heap(
+                    &mut heap,
+                    RankedItem {
+                        idx: i,
+                        dist: min_dist,
+                    },
+                );
+            }
+        }
+
+        if let Some((b_idx, b_dist)) = best_in_file {
+            push_heap(
+                &mut heap,
+                RankedItem {
+                    idx: b_idx,
+                    dist: b_dist,
+                },
+            );
+        }
+
+        let mut results: Vec<RankedItem> = heap.into_iter().collect();
+        results.sort_by(|a, b| a.dist.total_cmp(&b.dist));
+
+        results
+            .into_iter()
+            .map(|item| {
+                let idx = item.idx;
+                Hit {
+                    line_kind: crate::document::line_kind(&self.paths[idx], &self.kinds[idx]),
+                    path: self.paths[idx].clone(),
+                    kind: self.kinds[idx].clone(),
+                    score: -item.dist,
+                    start_line: self.start_lines[idx] as usize,
+                    end_line: self.end_lines[idx] as usize,
+                    chunk_index: Some(self.ordinals[idx] as usize),
+                }
+            })
+            .collect()
+    }
 }
 
 pub fn encode(v: &[f32], enc: Encoding) -> Vec<u8> {
@@ -396,6 +1229,264 @@ pub fn encode(v: &[f32], enc: Encoding) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "local flush microbenchmark on an isolated DB copy; WEFT_FLUSH_BENCH_DB"]
+    fn benchmark_snapshot_flush() {
+        let db = std::env::var("WEFT_FLUSH_BENCH_DB").expect("WEFT_FLUSH_BENCH_DB required");
+        let store = Store::open(Path::new(&db)).unwrap();
+        let dim: usize = store.setting("dim").unwrap().unwrap().parse().unwrap();
+        let start = std::time::Instant::now();
+        let rows = store.flush_vectors_bin(dim).unwrap();
+        let ms = start.elapsed().as_secs_f64() * 1000.;
+        let file_bytes = std::fs::metadata(&store.vec_path).unwrap().len();
+        let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+        unsafe {
+            libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+        }
+        #[cfg(target_os = "macos")]
+        let peak_mib = usage.ru_maxrss as f64 / (1024. * 1024.);
+        #[cfg(not(target_os = "macos"))]
+        let peak_mib = usage.ru_maxrss as f64 / 1024.;
+        println!(
+            "flush rows={rows} elapsed_ms={ms:.2} snapshot_bytes={file_bytes} peak_rss_mib={peak_mib:.1}"
+        );
+        assert_eq!(store.load_mmap_cache(dim).unwrap().count, rows);
+    }
+    #[test]
+    #[ignore = "local scan microbenchmark; set WEFT_BENCH_DB"]
+    fn benchmark_mmap_scan() {
+        let db = std::env::var("WEFT_BENCH_DB").expect("WEFT_BENCH_DB required");
+        let store = Store::open_read_only(Path::new(&db)).unwrap();
+        let dim: usize = store.setting("dim").unwrap().unwrap().parse().unwrap();
+        let cache = store.load_mmap_cache(dim).unwrap();
+        let query: Vec<f32> = (0..dim)
+            .map(|i| ((i * 97 % 313) as f32 - 155.0) / (dim as f32))
+            .collect();
+        let compiled = crate::wql::CompiledQuery::new(vec![
+            crate::wql::Affine::new(0.5, query.clone()),
+            crate::wql::Affine::new(0.5, query.iter().rev().copied().collect()),
+        ]);
+        fn sample(mut task: impl FnMut()) -> f64 {
+            let mut samples = Vec::new();
+            for _ in 0..12 {
+                let t = std::time::Instant::now();
+                task();
+                samples.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(|a, b| a.total_cmp(b));
+            samples[6]
+        }
+        let a = sample(|| {
+            std::hint::black_box(cache.scan_single(&query, 10, true));
+        });
+        let b = sample(|| {
+            std::hint::black_box(cache.scan_wql(&compiled, 10, true, |_, _| true));
+        });
+        let unfiltered = sample(|| {
+            std::hint::black_box(cache.scan_wql_unfiltered(&compiled, 10, true));
+        });
+        let c = sample(|| {
+            std::hint::black_box(
+                cache.scan_wql(&compiled, 10, true, |p, _| p.starts_with("/Users/")),
+            );
+        });
+        let d = sample(|| {
+            let mut total = 0f32;
+            for i in 0..cache.count {
+                total += crate::simd::q8_dot(cache.q8(i), &query) * cache.row_f32_fast(i);
+            }
+            std::hint::black_box(total);
+        });
+        let one = crate::wql::CompiledQuery::new(vec![crate::wql::Affine::new(0.5, query.clone())]);
+        let e = sample(|| {
+            std::hint::black_box(cache.scan_wql(&one, 10, true, |_, _| true));
+        });
+        let fast_one = sample(|| {
+            std::hint::black_box(cache.scan_wql_unfiltered(&one, 10, true));
+        });
+        println!(
+            "mmap count={} dim={} single_ms={a:.3} wql_2branch_ms={b:.3} wql_unfiltered_2branch_ms={unfiltered:.3} wql_filtered_ms={c:.3} raw_dot_ms={d:.3} wql_1branch_ms={e:.3} wql_unfiltered_1branch_ms={fast_one:.3}",
+            cache.count, dim
+        );
+
+        // Interleave kernels on the exact same mapped vectors. This avoids
+        // mistaking warmed pages or CPU frequency changes for a SIMD win.
+        let kernels: [(&str, fn(&[u8], &[f32]) -> f32); 3] = [
+            ("prior-8b", crate::simd::q8_dot_prior),
+            ("current-16b", crate::simd::q8_dot),
+            ("scalar", crate::simd::q8_dot_scalar),
+        ];
+        let mut timings: [Vec<f64>; 3] = std::array::from_fn(|_| Vec::new());
+        let mut totals = [0f64; 3];
+        for round in 0..27 {
+            for k in 0..3 {
+                let idx = (round + k) % 3;
+                let before = std::time::Instant::now();
+                let mut total = 0.0f64;
+                for i in 0..cache.count {
+                    total +=
+                        (kernels[idx].1)(cache.q8(i), &query) as f64 * cache.row_f32_fast(i) as f64;
+                }
+                let elapsed_ms = before.elapsed().as_secs_f64() * 1000.0;
+                timings[idx].push(elapsed_ms);
+                totals[idx] = std::hint::black_box(total);
+            }
+        }
+        for idx in 0..3 {
+            timings[idx].sort_by(f64::total_cmp);
+            let median = timings[idx][timings[idx].len() / 2];
+            let p10 = timings[idx][2];
+            let p90 = timings[idx][24];
+            println!(
+                "paired_kernel={} p10_ms={p10:.3} p50_ms={median:.3} p90_ms={p90:.3} checksum={:.6}",
+                kernels[idx].0, totals[idx]
+            );
+        }
+        assert!(
+            (totals[0] - totals[1]).abs() < 0.01,
+            "NEON variants diverged"
+        );
+
+        let other: Vec<f32> = query.iter().rev().copied().collect();
+        let two_kernels: [(&str, fn(&[u8], &[f32], &[f32]) -> (f32, f32)); 2] = [
+            ("separate-2pass", |bytes, q0, q1| {
+                (
+                    crate::simd::q8_dot(bytes, q0),
+                    crate::simd::q8_dot(bytes, q1),
+                )
+            }),
+            ("fused-1pass", crate::simd::q8_dot2),
+        ];
+        let mut paired: [Vec<f64>; 2] = std::array::from_fn(|_| Vec::new());
+        let mut check = [(0f64, 0f64); 2];
+        for round in 0..32 {
+            for k in 0..2 {
+                let idx = (round + k) % 2;
+                let start = std::time::Instant::now();
+                let mut accum = (0f64, 0f64);
+                for i in 0..cache.count {
+                    let (x, y) = two_kernels[idx].1(cache.q8(i), &query, &other);
+                    let scale = cache.row_f32_fast(i) as f64;
+                    accum.0 += x as f64 * scale;
+                    accum.1 += y as f64 * scale;
+                }
+                paired[idx].push(start.elapsed().as_secs_f64() * 1000.0);
+                check[idx] = std::hint::black_box(accum);
+            }
+        }
+        for (idx, (name, _)) in two_kernels.iter().enumerate() {
+            paired[idx].sort_by(f64::total_cmp);
+            println!(
+                "paired_2branch={name} p50_ms={:.3} p90_ms={:.3}",
+                paired[idx][16], paired[idx][29]
+            );
+        }
+        assert!((check[0].0 - check[1].0).abs() < 0.01);
+        assert!((check[0].1 - check[1].1).abs() < 0.01);
+    }
+
+    #[test]
+    fn mmap_hits_match_sqlite_ranking() {
+        let root = std::env::temp_dir().join(format!(
+            "weft-mmap-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("index.sqlite");
+        let mut store = Store::open(&db).unwrap();
+        store.set_setting("dim", "3").unwrap();
+        for (path, vectors) in [
+            ("/z.md", vec![[0.2, 0.5, 0.9], [0.4, 0.3, 0.9]]),
+            ("/a.md", vec![[0.8, 0.1, 0.2], [0.7, 0.5, 0.3]]),
+            ("/b.md", vec![[0.3, 0.3, 0.9], [0.3, 0.3, 0.9]]),
+        ] {
+            let chunks = vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i + 1, i + 1, pack(v, Encoding::Q8), None))
+                .collect::<Vec<_>>();
+            store.replace(path, "hash", "text", 1, &chunks).unwrap();
+        }
+        let q = [1.0, 0.0, 0.0];
+        let sql = store
+            .rank_by(2, true, |_, _| true, |b| similarity(&q, b, Encoding::Q8))
+            .unwrap();
+        store.flush_vectors_bin(3).unwrap();
+        let mmap = store.hits(&q, Encoding::Q8, 2).unwrap();
+        assert_eq!(
+            mmap.iter().map(|h| &h.path).collect::<Vec<_>>(),
+            sql.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+        for (a, b) in mmap.iter().zip(&sql) {
+            assert!((a.score - b.score).abs() < 1e-5);
+        }
+        drop(store);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn fused_mmap_two_branch_matches_unfused_flat_ranking() {
+        let root = std::env::temp_dir().join(format!("weft-fused-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("fused.sqlite");
+        let mut store = Store::open(&db).unwrap();
+        let dim = 768;
+        store.set_setting("dim", &dim.to_string()).unwrap();
+        for file in 0..80 {
+            let mut chunks = Vec::new();
+            for sub in 0..3 {
+                let v: Vec<f32> = (0..dim)
+                    .map(|i| (((i * 19 + file * 73 + sub * 23) % 257) as f32 - 128.) / 151.)
+                    .collect();
+                chunks.push((sub + 1, sub + 1, pack(&v, Encoding::Q8), None));
+            }
+            store
+                .replace(&format!("/fused/{file:03}.md"), "h", "text", 2, &chunks)
+                .unwrap();
+        }
+        store.flush_vectors_bin(dim).unwrap();
+        let mapped = store.load_mmap_cache(dim).unwrap();
+        let flat = store.load_flat_cache(dim).unwrap();
+        let qa: Vec<f32> = (0..dim)
+            .map(|i| ((i * 79 % 211) as f32 - 105.) / 309.)
+            .collect();
+        let qb: Vec<f32> = (0..dim)
+            .map(|i| ((i * 47 % 197) as f32 - 98.) / 217.)
+            .collect();
+        let compiled = crate::wql::CompiledQuery::new(vec![
+            crate::wql::Affine::new(0.25, qa),
+            crate::wql::Affine::new(-0.15, qb),
+        ]);
+        for per_file in [true, false] {
+            let got = mapped.scan_wql(&compiled, 35, per_file, |_, _| true);
+            let fast = mapped.scan_wql_unfiltered(&compiled, 35, per_file);
+            let want = flat.scan_wql(&compiled, 35, per_file, |_, _| true);
+            assert_eq!(got.len(), want.len());
+            assert_eq!(got.len(), fast.len());
+            for (a, b) in got.iter().zip(&fast) {
+                assert_eq!((&a.path, a.chunk_index), (&b.path, b.chunk_index));
+                assert_eq!(a.score, b.score);
+            }
+            for (a, b) in got.iter().zip(&want) {
+                assert_eq!((&a.path, a.chunk_index), (&b.path, b.chunk_index));
+                assert!(
+                    (a.score - b.score).abs() < 1e-5,
+                    "{}: {} vs {}",
+                    a.path,
+                    a.score,
+                    b.score
+                );
+            }
+        }
+        drop(mapped);
+        drop(flat);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn coverage_respects_components_kinds_and_empty_documents() {
         let mut store = Store::open(Path::new(":memory:")).unwrap();

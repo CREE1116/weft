@@ -31,15 +31,23 @@ pub fn rank(
     folder: bool,
     limit: usize,
     mut accept: impl FnMut(&str, &str) -> bool,
-    mut score: impl FnMut(&[f32]) -> f32,
+    mut score: impl FnMut(&[f32], Option<f32>) -> Option<f32>,
 ) -> Result<(Vec<Representative>, usize, usize)> {
     let mut pool: Vec<Representative> = Vec::new();
     let mut folders: BTreeMap<String, (Vec<f32>, usize, usize, blake3::Hasher)> = BTreeMap::new();
     let mut evaluated_chunks = 0;
     let mut evaluated_candidates = 0;
     let mut keep = |mut candidate: Representative| {
-        candidate.hit.score = score(&candidate.vector);
         evaluated_candidates += 1;
+        let cutoff = if pool.len() == limit {
+            pool.last().map(|r| r.hit.score)
+        } else {
+            None
+        };
+        let Some(value) = score(&candidate.vector, cutoff) else {
+            return;
+        };
+        candidate.hit.score = value;
         let position = pool.partition_point(|old| {
             old.hit.score > candidate.hit.score
                 || (old.hit.score == candidate.hit.score && old.hit.path < candidate.hit.path)

@@ -1,4 +1,5 @@
 //! Multi-basis distance ranking and bounded, verified evidence for agents.
+use crate::scoring::{composite, cosine};
 use crate::{
     chunk,
     store::{Hit, Store},
@@ -13,12 +14,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Executor {
+    Exact,
+    Reference,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Combine {
     All,
     Any,
     Strict,
+    /// Maximize the weakest positive similarity. Useful for finding the
+    /// intersection of two concepts rather than their centroid.
+    Bridge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
@@ -81,6 +91,9 @@ pub struct Options {
     /// Total Unicode-character budget for verified source excerpts; 0 disables reads.
     #[arg(long, default_value_t = 0)]
     pub context_chars: usize,
+    /// Exact uses conservative compiled/SIMD screening; reference is the old full scorer.
+    #[arg(long, value_enum, default_value = "exact")]
+    pub executor: Executor,
     #[arg(long)]
     pub json: bool,
 }
@@ -157,32 +170,8 @@ pub struct Response {
     pub pool_limit: usize,
     pub selection_uses_pool: bool,
     pub context_chars_used: usize,
+    pub execution: crate::scoring::Stats,
     pub hits: Vec<Evidence>,
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| x * y)
-        .sum::<f32>()
-        .clamp(-1.0, 1.0)
-}
-
-fn composite(distances: &[f32], positives: usize, mode: Combine, weight: f32) -> f32 {
-    let positive = match mode {
-        Combine::All => distances[..positives].iter().sum(),
-        Combine::Any => distances[..positives]
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min),
-        Combine::Strict => distances[..positives].iter().copied().fold(0.0, f32::max),
-    };
-    let negative = distances[positives..]
-        .iter()
-        .copied()
-        .reduce(f32::min)
-        .unwrap_or(0.0);
-    positive - weight * negative
 }
 
 pub fn run(
@@ -278,10 +267,13 @@ pub fn run(
             && options.kind.as_ref().is_none_or(|k| k == kind)
             && !excluded.iter().any(|p| Path::new(path).starts_with(p))
     };
-    let score = |v: &[f32]| {
-        let d: Vec<_> = vectors.iter().map(|basis| 1.0 - cosine(v, basis)).collect();
-        -composite(&d, positives, options.combine, options.avoid_weight)
-    };
+    let mut query = crate::scoring::Query::new(
+        &vectors,
+        positives,
+        options.combine,
+        options.avoid_weight,
+        matches!(options.executor, Executor::Reference),
+    );
     let aggregate = matches!(options.level, Some(Level::File | Level::Folder));
     let (records, evaluated_candidates) = if aggregate {
         let (records, chunks, count) = crate::hierarchy::rank(
@@ -291,14 +283,14 @@ pub fn run(
             options.level == Some(Level::Folder),
             pool_limit,
             &mut accept,
-            score,
+            |v, cutoff| query.score_vector(v, cutoff),
         )?;
         evaluated = chunks;
         (records, count)
     } else {
         let mut last_path = String::new();
         let mut file_count = 0;
-        let hits = store.rank_by(
+        let hits = store.rank_bounded(
             pool_limit,
             !options.chunks && options.level != Some(Level::Chunk),
             |path, kind| {
@@ -309,9 +301,9 @@ pub fn run(
                 }
                 accepted
             },
-            |blob| {
+            |blob, cutoff| {
                 evaluated += 1;
-                Ok(score(&unpack_normalized(blob, enc, dim)?))
+                query.score_blob(blob, enc, cutoff)
             },
         )?;
         let count = if options.chunks || options.level == Some(Level::Chunk) {
@@ -468,6 +460,7 @@ pub fn run(
         pool_limit,
         selection_uses_pool: options.diversity > 0.0 || options.dedup_cosine.is_some(),
         context_chars_used: options.context_chars - remaining,
+        execution: query.stats,
         hits: selected.into_iter().map(|(e, _)| e).collect(),
     })
 }
