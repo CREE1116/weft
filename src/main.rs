@@ -1,6 +1,8 @@
 mod chunk;
 mod embed;
 mod native;
+mod query;
+mod resource;
 mod scan;
 mod store;
 mod vector;
@@ -75,6 +77,9 @@ enum Cmd {
         /// Start an independent background scan and write progress to a log.
         #[arg(long, conflicts_with = "dry_run")]
         background: bool,
+        /// Inference time budget, 1..100%; background default 25, foreground default 100.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+        duty_cycle: Option<u8>,
         #[arg(long, default_value_t = 768)]
         dim: usize,
         #[arg(long, default_value = "q8")]
@@ -91,18 +96,38 @@ enum Cmd {
     /// Rank indexed files by a natural-language question.
     Search {
         query: String,
+        /// semantic, path (filename/folder terms), or hybrid (rank fusion).
+        #[arg(long, default_value = "semantic", value_parser = ["semantic", "path", "hybrid"])]
+        mode: String,
         #[arg(long, default_value_t = 10)]
         top: usize,
         #[arg(long)]
         json: bool,
     },
     /// Find files similar to an already indexed file, with no model startup.
+    #[command(alias = "file2file")]
     Similar {
         file: PathBuf,
         #[arg(long, default_value_t = 10)]
         top: usize,
         #[arg(long)]
         json: bool,
+    },
+    /// Execute JSON retrieval leaves and file-set union/intersection/difference.
+    Query {
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cooperatively pause/resume/stop or change an active indexer's time budget.
+    Control {
+        #[arg(value_parser = ["pause", "resume", "stop", "limit"])]
+        action: String,
+        #[arg(long, required_if_eq("action", "limit"), value_parser = clap::value_parser!(u8).range(1..=100))]
+        duty_cycle: Option<u8>,
     },
     Stats {
         #[arg(long)]
@@ -129,6 +154,7 @@ fn main() -> Result<()> {
             exclude,
             dry_run,
             background,
+            duty_cycle,
             dim,
             encoding,
             media,
@@ -186,7 +212,7 @@ fn main() -> Result<()> {
                 if indexing_running(&cli.db)? {
                     bail!("another indexer is already running for this database");
                 }
-                start_background(&cli.db)?;
+                start_background(&cli.db, *duty_cycle)?;
                 return Ok(());
             }
             index(
@@ -203,23 +229,106 @@ fn main() -> Result<()> {
                 *all && path.is_none(),
                 exclude,
                 *dry_run,
+                duty_cycle.unwrap_or(100),
             )?;
         }
-        Cmd::Search { query, top, json } => {
-            let (dim, enc) = config(&store)?;
-            check_backend(&store, &cli)?;
-            let mut engine = new_embedder(&cli)?;
-            let q = engine.embed(
-                &[Input {
-                    kind: "text",
-                    value: query.clone(),
-                }],
-                "query",
-            )?;
-            show(
-                store.hits(&normalized_prefix(&q[0], dim)?, enc, *top)?,
-                *json,
-            )?;
+        Cmd::Search {
+            query,
+            mode,
+            top,
+            json,
+        } => {
+            if query.trim().is_empty() {
+                bail!("query must not be empty");
+            }
+            let paths = if mode != "semantic" {
+                store.paths(query, None, None)?
+            } else {
+                Vec::new()
+            };
+            let mut hits = if mode == "path" {
+                paths
+            } else {
+                let (dim, enc) = config(&store)?;
+                check_backend(&store, &cli)?;
+                let mut engine = new_embedder(&cli)?;
+                let q = engine.embed(
+                    &[Input {
+                        kind: "text",
+                        value: query.clone(),
+                    }],
+                    "query",
+                )?;
+                let semantic = store.hits(&normalized_prefix(&q[0], dim)?, enc, *top)?;
+                if mode == "hybrid" {
+                    query::union(vec![semantic, paths])
+                } else {
+                    semantic
+                }
+            };
+            hits.truncate(*top);
+            show(hits, *json)?;
+        }
+        Cmd::Query { spec, top, json } => {
+            use std::io::Read;
+            let mut raw = Vec::new();
+            if spec == Path::new("-") {
+                std::io::stdin()
+                    .take(1024 * 1024 + 1)
+                    .read_to_end(&mut raw)?;
+            } else {
+                std::fs::File::open(spec)
+                    .context("read query specification")?
+                    .take(1024 * 1024 + 1)
+                    .read_to_end(&mut raw)?;
+            }
+            if raw.len() > 1024 * 1024 {
+                bail!("query specification exceeds 1 MiB");
+            }
+            let spec: query::Query = serde_json::from_slice(&raw)?;
+            spec.validate()?;
+            // Metadata-only leaves still work on an empty index, without model loading.
+            let dim = store
+                .setting("dim")?
+                .map(|s| s.parse::<usize>())
+                .transpose()?
+                .unwrap_or(768);
+            let enc = Encoding::parse(&store.setting("encoding")?.unwrap_or_else(|| "q8".into()))?;
+            let mut engine = None;
+            let mut hits = query::evaluate(&spec, &store, dim, enc, &mut |text| {
+                check_backend(&store, &cli)?;
+                if engine.is_none() {
+                    engine = Some(new_embedder(&cli)?);
+                }
+                Ok(engine
+                    .as_mut()
+                    .unwrap()
+                    .embed(
+                        &[Input {
+                            kind: "text",
+                            value: text.into(),
+                        }],
+                        "query",
+                    )?
+                    .remove(0))
+            })?;
+            hits.truncate(*top);
+            show(hits, *json)?;
+        }
+        Cmd::Control { action, duty_cycle } => {
+            if !indexing_running(&cli.db)? {
+                bail!("no indexer is running for this database");
+            }
+            if let Some(duty) = duty_cycle {
+                store.set_setting("index_duty_cycle", &duty.to_string())?;
+            }
+            if action != "limit" {
+                store.set_setting("index_action", action)?;
+            }
+            println!(
+                "{}",
+                serde_json::json!({"requested":action,"duty_cycle":store.setting("index_duty_cycle")?})
+            );
         }
         Cmd::Similar { file, top, json } => {
             let (dim, enc) = config(&store)?;
@@ -251,6 +360,8 @@ fn main() -> Result<()> {
                     "database_bytes": disk_bytes,
                     "backend": store.setting("backend")?, "last_scan": last_scan,
                     "indexer_running": indexer_running,
+                    "index_action": store.setting("index_action")?,
+                    "index_duty_cycle": store.setting("index_duty_cycle")?,
                     }))?
                 );
                 return Ok(());
@@ -368,7 +479,7 @@ fn database_disk_bytes(db: &Path) -> Result<u64> {
     Ok(bytes)
 }
 
-fn start_background(db: &Path) -> Result<()> {
+fn start_background(db: &Path, duty_cycle: Option<u8>) -> Result<()> {
     use std::process::{Command, Stdio};
     let log_path = db.with_extension("log");
     let log = std::fs::OpenOptions::new()
@@ -381,6 +492,10 @@ fn start_background(db: &Path) -> Result<()> {
         .position(|arg| arg == "--background")
         .context("missing background flag")?;
     args.remove(position);
+    if duty_cycle.is_none() {
+        args.push("--duty-cycle".into());
+        args.push("25".into());
+    }
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(args)
@@ -395,6 +510,9 @@ fn start_background(db: &Path) -> Result<()> {
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -428,6 +546,7 @@ fn index(
     computer: bool,
     exclusions: &[PathBuf],
     dry_run: bool,
+    duty_cycle: u8,
 ) -> Result<()> {
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -436,11 +555,16 @@ fn index(
         .open(cli.db.with_extension("index.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .context("another indexer is already running for this database")?;
+    if !dry_run {
+        store.set_setting("index_action", "resume")?;
+        store.set_setting("index_duty_cycle", &duty_cycle.to_string())?;
+    }
     let started = Instant::now();
     let mut engine: Option<Embedder> = None;
     let mut visited = HashSet::new();
     let (mut added, mut skipped, mut errors) = (0usize, 0usize, 0usize);
     let (mut discovered, mut filename_only) = (0usize, 0usize);
+    let mut reused_chunks = 0usize;
     let mut excluded = exclusions
         .iter()
         .map(|p| {
@@ -459,6 +583,7 @@ fn index(
         excluded.push(PathBuf::from(format!("{}{suffix}", db.display())));
     }
     excluded.push(db.with_extension("index.lock"));
+    excluded.push(db.with_extension("log"));
     let report = |status: &str,
                   discovered: usize,
                   added: usize,
@@ -466,7 +591,7 @@ fn index(
                   filename_only: usize,
                   errors: usize| {
         serde_json::json!({"status":status,"root":root,"pid":std::process::id(),
-            "discovered":discovered,"indexed":added,"unchanged_or_skipped":skipped,
+            "duty_cycle":duty_cycle,"discovered":discovered,"indexed":added,"unchanged_or_skipped":skipped,
             "filename_only_discovered":filename_only,"errors":errors,"elapsed_seconds":started.elapsed().as_secs_f64()})
     };
     if !dry_run {
@@ -481,6 +606,9 @@ fn index(
         .follow_links(false)
         .filter_entry(move |entry| !scan::excluded(entry.path(), computer, &excluded));
     for entry in walker.build() {
+        if !dry_run && !resource::gate(store, &mut engine)? {
+            return Ok(());
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -640,9 +768,7 @@ fn index(
             skipped += 1;
             continue;
         }
-        if engine.is_none() {
-            engine = Some(new_embedder(cli)?);
-        }
+        let mut cache = store.cached_chunks(&path_str)?;
         if segments.len() > 32 {
             let mut progress = report("running", discovered, added, skipped, filename_only, errors);
             progress["active_file"] = serde_json::json!(path);
@@ -652,13 +778,35 @@ fn index(
         }
         let mut packed = Vec::with_capacity(segments.len());
         let mut success = true;
-        for batch in segments.chunks(8) {
+        for batch in segments.chunks(1) {
+            if !resource::gate(store, &mut engine)? {
+                return Ok(());
+            }
+            let item = &batch[0];
+            let input_hash = if item.2.kind == "text" {
+                Some(*blake3::hash(item.2.value.as_bytes()).as_bytes())
+            } else {
+                None
+            };
+            if let Some(bytes) = input_hash.as_ref().and_then(|hash| cache.get(&hash[..])) {
+                packed.push((item.0, item.1, bytes.clone(), input_hash));
+                reused_chunks += 1;
+                continue;
+            }
+            if engine.is_none() {
+                engine = Some(new_embedder(cli)?);
+            }
+            let compute_started = Instant::now();
             let input: Vec<Input> = batch.iter().map(|item| item.2.clone()).collect();
             match engine.as_mut().unwrap().embed(&input, "document") {
                 Ok(vectors) => {
                     for (item, v) in batch.iter().zip(vectors.iter()) {
                         let norm = normalized_prefix(v, dim)?;
-                        packed.push((item.0, item.1, store::encode(&norm, enc)));
+                        let bytes = store::encode(&norm, enc);
+                        if let Some(hash) = input_hash {
+                            cache.insert(hash.to_vec(), bytes.clone());
+                        }
+                        packed.push((item.0, item.1, bytes, input_hash));
                     }
                     if segments.len() > 32 && packed.len() % 64 == 0 {
                         let mut progress =
@@ -675,6 +823,9 @@ fn index(
                     success = false;
                     break;
                 }
+            }
+            if !resource::throttle(store, &mut engine, compute_started.elapsed())? {
+                return Ok(());
             }
         }
         if !success {
@@ -699,20 +850,18 @@ fn index(
         eprintln!("prune skipped due to scan/embedding errors");
     }
     let (files, chunks, bytes) = store.stats()?;
-    store.set_setting(
-        "last_scan",
-        &report(
-            if errors == 0 { "complete" } else { "partial" },
-            discovered,
-            added,
-            skipped,
-            filename_only,
-            errors,
-        )
-        .to_string(),
-    )?;
+    let mut final_report = report(
+        if errors == 0 { "complete" } else { "partial" },
+        discovered,
+        added,
+        skipped,
+        filename_only,
+        errors,
+    );
+    final_report["reused_chunks"] = serde_json::json!(reused_chunks);
+    store.set_setting("last_scan", &final_report.to_string())?;
     println!(
-        "indexed={added} unchanged/skipped={skipped} errors={errors} pruned={deleted} files={files} chunks={chunks} vector_bytes={bytes} elapsed={:.2}s",
+        "indexed={added} reused_chunks={reused_chunks} unchanged/skipped={skipped} errors={errors} pruned={deleted} files={files} chunks={chunks} vector_bytes={bytes} elapsed={:.2}s",
         started.elapsed().as_secs_f32()
     );
     if errors > 0 {

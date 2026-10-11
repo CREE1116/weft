@@ -3,11 +3,13 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
+pub type PackedChunk = (usize, usize, Vec<u8>, Option<[u8; 32]>);
+
 pub struct Store {
     pub conn: Connection,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Hit {
     pub path: String,
     pub kind: String,
@@ -21,7 +23,8 @@ impl Store {
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
-        let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let mut conn =
+            Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
@@ -36,6 +39,20 @@ impl Store {
                 embedding BLOB NOT NULL, PRIMARY KEY (doc_id, ordinal)
             );",
         )?;
+        // Additive migration: legacy vectors remain readable and legacy writers
+        // can omit this nullable column. Reopening is idempotent.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_hash = {
+            let mut stmt = tx.prepare("PRAGMA table_info(chunks)")?;
+            let names = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            names.iter().any(|name| name == "input_hash")
+        };
+        if !has_hash {
+            tx.execute("ALTER TABLE chunks ADD COLUMN input_hash BLOB", [])?;
+        }
+        tx.commit()?;
         Ok(Self { conn })
     }
     pub fn set_setting(&self, name: &str, value: &str) -> Result<()> {
@@ -87,7 +104,7 @@ impl Store {
         hash: &str,
         kind: &str,
         bytes: usize,
-        vectors: &[(usize, usize, Vec<u8>)],
+        vectors: &[PackedChunk],
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("INSERT INTO documents(path,hash,kind,bytes) VALUES (?1,?2,?3,?4)
@@ -98,9 +115,16 @@ impl Store {
         })?;
         tx.execute("DELETE FROM chunks WHERE doc_id=?1", [id])?;
         {
-            let mut statement = tx.prepare("INSERT INTO chunks(doc_id,ordinal,start_line,end_line,embedding) VALUES (?1,?2,?3,?4,?5)")?;
-            for (idx, (start, end, vec)) in vectors.iter().enumerate() {
-                statement.execute(params![id, idx as i64, *start as i64, *end as i64, vec])?;
+            let mut statement = tx.prepare("INSERT INTO chunks(doc_id,ordinal,start_line,end_line,embedding,input_hash) VALUES (?1,?2,?3,?4,?5,?6)")?;
+            for (idx, (start, end, vec, hash)) in vectors.iter().enumerate() {
+                statement.execute(params![
+                    id,
+                    idx as i64,
+                    *start as i64,
+                    *end as i64,
+                    vec,
+                    hash.as_ref().map(|h| &h[..])
+                ])?;
             }
         }
         tx.commit()?;
@@ -127,38 +151,111 @@ impl Store {
         }
         Ok(deleted)
     }
+    pub fn cached_chunks(&self, path: &str) -> Result<std::collections::HashMap<Vec<u8>, Vec<u8>>> {
+        let mut stmt = self.conn.prepare("SELECT c.input_hash,c.embedding FROM chunks c JOIN documents d ON d.id=c.doc_id WHERE d.path=?1 AND c.input_hash IS NOT NULL")?;
+        let rows = stmt.query_map([path], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
     pub fn hits(&self, query: &[f32], encoding: Encoding, limit: usize) -> Result<Vec<Hit>> {
-        use std::collections::HashMap;
-        let mut stmt = self.conn.prepare(
-            "SELECT d.path,d.kind,c.start_line,c.end_line,c.embedding
-            FROM chunks c JOIN documents d ON d.id=c.doc_id",
-        )?;
-        let mut rows = stmt.query([])?;
-        let mut best: HashMap<String, Hit> = HashMap::new();
-        while let Some(row) = rows.next()? {
-            let path: String = row.get(0)?;
-            let kind: String = row.get(1)?;
-            let start_line: usize = row.get::<_, i64>(2)? as usize;
-            let end_line: usize = row.get::<_, i64>(3)? as usize;
-            let blob: Vec<u8> = row.get(4)?;
-            let score = similarity(query, &blob, encoding)?;
-            if best.get(&path).is_none_or(|old| score > old.score) {
-                best.insert(
-                    path.clone(),
-                    Hit {
-                        path,
-                        kind,
-                        score,
-                        start_line,
-                        end_line,
-                    },
-                );
+        use std::{cmp::Reverse, collections::BinaryHeap};
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        #[derive(Debug)]
+        struct Ranked(Hit);
+        impl PartialEq for Ranked {
+            fn eq(&self, other: &Self) -> bool {
+                self.cmp(other).is_eq()
             }
         }
-        let mut hits: Vec<Hit> = best.into_values().collect();
+        impl Eq for Ranked {}
+        impl PartialOrd for Ranked {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for Ranked {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.0
+                    .score
+                    .total_cmp(&other.0.score)
+                    .then(other.0.path.cmp(&self.0.path))
+            }
+        }
+        let mut heap: BinaryHeap<Reverse<Ranked>> = BinaryHeap::new();
+        let mut keep = |hit: Hit| {
+            let item = Reverse(Ranked(hit));
+            if heap.len() < limit {
+                heap.push(item);
+            } else if heap.peek().is_some_and(|worst| item.0 > worst.0) {
+                heap.pop();
+                heap.push(item);
+            }
+        };
+        // The chunks primary key already orders document IDs/ordinals. Keep only
+        // the best current-document chunk and K candidates, not every file.
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id,d.path,d.kind,c.start_line,c.end_line,c.embedding
+            FROM chunks c JOIN documents d ON d.id=c.doc_id ORDER BY c.doc_id,c.ordinal",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut current_id = None;
+        let mut best: Option<Hit> = None;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            if current_id != Some(id) {
+                if let Some(hit) = best.take() {
+                    keep(hit);
+                }
+                current_id = Some(id);
+            }
+            let blob: Vec<u8> = row.get(5)?;
+            let score = similarity(query, &blob, encoding)?;
+            if best.as_ref().is_none_or(|old| score > old.score) {
+                best = Some(Hit {
+                    path: row.get(1)?,
+                    kind: row.get(2)?,
+                    score,
+                    start_line: row.get::<_, i64>(3)? as usize,
+                    end_line: row.get::<_, i64>(4)? as usize,
+                });
+            }
+        }
+        if let Some(hit) = best {
+            keep(hit);
+        }
+        let mut hits: Vec<_> = heap.into_iter().map(|item| item.0.0).collect();
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.path.cmp(&b.path)));
-        hits.truncate(limit);
         Ok(hits)
+    }
+    /// Metadata-only matching does not read source files or start inference.
+    pub fn paths(&self, query: &str, under: Option<&Path>, kind: Option<&str>) -> Result<Vec<Hit>> {
+        let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path,kind FROM documents ORDER BY path")?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let record_kind: String = row.get(1)?;
+            if under.is_some_and(|root| !Path::new(&path).starts_with(root))
+                || kind.is_some_and(|k| k != record_kind)
+                || !terms.iter().all(|term| path.to_lowercase().contains(term))
+            {
+                continue;
+            }
+            out.push(Hit {
+                path,
+                kind: record_kind,
+                score: 1.0,
+                start_line: 0,
+                end_line: 0,
+            });
+        }
+        Ok(out)
     }
     pub fn stats(&self) -> Result<(usize, usize, usize)> {
         let files: i64 = self
@@ -232,4 +329,102 @@ impl Store {
 
 pub fn encode(v: &[f32], enc: Encoding) -> Vec<u8> {
     pack(v, enc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bounded_ranking_matches_exhaustive_search_and_ties() {
+        for enc in [Encoding::F32, Encoding::Q8] {
+            let mut store = Store::open(Path::new(":memory:")).unwrap();
+            let query = vec![1.0, 0.0];
+            let mut expected = Vec::new();
+            for i in 0..80 {
+                let path = format!("/fixture/{i:03}.md");
+                let mut chunks = Vec::new();
+                let mut score = f32::NEG_INFINITY;
+                let mut line = 0;
+                for j in 0..3 {
+                    let v = crate::vector::normalized_prefix(
+                        &[((i * 13 + j * 17) % 11) as f32, 1.0],
+                        2,
+                    )
+                    .unwrap();
+                    let bytes = encode(&v, enc);
+                    let s = similarity(&query, &bytes, enc).unwrap();
+                    if s > score {
+                        score = s;
+                        line = j + 1;
+                    }
+                    chunks.push((j + 1, j + 1, bytes, None));
+                }
+                store.replace(&path, "hash", "text", 1, &chunks).unwrap();
+                expected.push((path, score, line));
+            }
+            expected.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            for k in [0, 1, 7, 80, 100] {
+                let actual = store.hits(&query, enc, k).unwrap();
+                let reference: Vec<_> = expected.iter().take(k).cloned().collect();
+                assert_eq!(
+                    actual
+                        .into_iter()
+                        .map(|h| (h.path, h.score, h.start_line))
+                        .collect::<Vec<_>>(),
+                    reference
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn additive_hash_migration_preserves_legacy_vectors_and_writers() {
+        let path = std::env::temp_dir().join(format!(
+            "myvec-migration-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch("CREATE TABLE documents(id INTEGER PRIMARY KEY,path TEXT UNIQUE NOT NULL,hash TEXT NOT NULL,kind TEXT NOT NULL,bytes INTEGER NOT NULL); CREATE TABLE chunks(doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,ordinal INTEGER NOT NULL,start_line INTEGER NOT NULL,end_line INTEGER NOT NULL,embedding BLOB NOT NULL,PRIMARY KEY(doc_id,ordinal)); INSERT INTO documents VALUES(1,'/legacy.md','hash','text',1);").unwrap();
+            old.execute(
+                "INSERT INTO chunks VALUES(1,0,1,1,?1)",
+                [encode(&[1.0, 0.0], Encoding::F32)],
+            )
+            .unwrap();
+            let mut new = Store::open(&path).unwrap();
+            assert_eq!(new.stats().unwrap(), (1, 1, 8));
+            assert_eq!(
+                new.hits(&[1.0, 0.0], Encoding::F32, 1).unwrap()[0].path,
+                "/legacy.md"
+            );
+            assert!(new.cached_chunks("/legacy.md").unwrap().is_empty());
+            let hash = *blake3::hash(b"new text").as_bytes();
+            new.replace(
+                "/new.md",
+                "hash",
+                "text",
+                1,
+                &[(1, 1, encode(&[0.0, 1.0], Encoding::F32), Some(hash))],
+            )
+            .unwrap();
+            assert_eq!(new.cached_chunks("/new.md").unwrap().len(), 1);
+            // Legacy writers explicitly name columns, so the nullable addition
+            // also permits rolling back to the previous binary.
+            old.execute("INSERT INTO chunks(doc_id,ordinal,start_line,end_line,embedding) VALUES(1,1,2,2,?1)",[encode(&[0.0,1.0],Encoding::F32)]).unwrap();
+            assert_eq!(Store::open(&path).unwrap().stats().unwrap(), (2, 3, 24));
+            let columns: i64 = old
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('chunks') WHERE name='input_hash'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(columns, 1);
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
 }

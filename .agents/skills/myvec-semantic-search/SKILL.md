@@ -1,6 +1,6 @@
 ---
 name: myvec-semantic-search
-description: Search the local computer's myvec semantic file index, retrieve matching text chunks with line numbers, or find related files. Use for finding information across local files by meaning.
+description: Search local files by meaning or filename, find related files, and combine retrieval sets with union, intersection, or difference using myvec. Retrieve matching text chunks with source line numbers.
 ---
 
 # Local semantic file search
@@ -10,9 +10,13 @@ Use installed `myvec` from any directory. If PATH has not been refreshed, use `$
 1. Run `myvec stats --json` to check coverage and `indexer_running`. The installer starts the initial computer scan in the background; partial results are searchable immediately. A last scan marked `running` with `indexer_running=false` was interrupted. Read `$HOME/.local/share/myvec/index.log` when diagnosing indexing errors.
 2. Search with `myvec search "natural language question" --top 10 --json`. Matching text chunks have `kind=text`, `start_line`, `end_line`, and an absolute path. Open the relevant lines and cite the actual source when answering.
 3. A `kind=path` hit has filename/folder/type embeddings only, with line numbers zero. This does not establish what an image depicts, what audio contains, or what a PDF says. Inspect that file with an appropriate reader before making content claims.
-4. Find related files with `myvec similar ABSOLUTE_PATH --top 10 --json`; this uses indexed vectors without model startup.
+4. Use `search "filename terms" --mode path --json` for literal filename/folder matching without inference, or `--mode hybrid` for rank fusion with semantic search. Metadata hits have line numbers zero even when `kind=text`; fused scores are not cosine scores. Find related files with `myvec similar ABSOLUTE_PATH --top 10 --json`; this uses indexed vectors without model startup.
 5. Refresh requested folders with `myvec index FOLDER`. To include filenames of unsupported formats in that folder, use `myvec index --all FOLDER`. Run `myvec index --all --background` for a whole-computer refresh when the user requests it, and check `stats --json` afterward. Use `--dry-run` to preview coverage and repeat `--exclude PATH` for custom omissions. Do not expand the user's requested scope merely because the skill is installed.
 6. Pruning is optional: use `index ... --prune` only for a complete root scan. Errors prevent pruning. Do not edit database backend/model settings to bypass mismatch errors.
+
+For combinations, pass a JSON specification to `myvec query --spec - --json` on stdin. Leaves: `{"op":"text","query":"question","top":50,"min_score":0.3}`, `{"op":"file","path":"/absolute/reference.md","top":50}`, `{"op":"path","query":"terms","under":"/absolute/folder","kind":"text"}`. Compose with `{"op":"union|intersection|difference","args":[LEFT,RIGHT]}` using an actual operation name. Sets use exact file-path identity. Text/file leaves are bounded retrieval sets, not logical truth predicates; use metadata leaves for exact exclusions. Intersection/difference retain the left ranking; union uses reciprocal rank fusion. Output top applies after set evaluation. Prefer a semantic/file leaf first when chunk evidence is needed. Specifications are limited to 1 MiB, depth 16 and 128 nodes.
+
+Background scans default to 25% inference duty cycle; explicit `--duty-cycle 1..100` adjusts it. User-requested controls: `myvec control pause|resume|stop`, `myvec control limit --duty-cycle 20`. Pause releases the model after current inference; resume may reload it. Stop preserves committed files and skips pruning. A pause/stop request is cooperative; verify `last_scan.status` and `indexer_running` rather than treating the request as an immediate state change. No automatic file watcher or battery/thermal scheduling exists.
 
 Native indexing chunks text (default 1,100 characters, two lines of overlap), preserves Unicode, and embeds only changed files. Keep 768 dimensions and Q8 vector storage by default; reducing dimensions needs a labeled comparison on the relevant corpus. Whole-computer scanning excludes system/runtime directories, caches, dependencies, private-key stores, `.env` files and the index itself, respects ignore files, and does not follow symlinks. Permission failures and oversized files mean coverage is not literally every byte on disk.
 

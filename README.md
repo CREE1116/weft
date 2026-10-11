@@ -33,6 +33,57 @@ GPU use during the initial scan is expected with the Metal/CUDA build: files are
 
 Reload your agent session after installing the skill if it does not appear yet. The skill lets the agent query the same CLI and read matching source lines. It does not grant permission to expand a future user's indexing scope.
 
+## Search modes and file sets
+
+```sh
+myvec search "재시도 정책" --mode semantic --json
+myvec search "retry .rs" --mode path --json
+myvec search "retry" --mode hybrid --json
+myvec file2file ~/Documents/retry.md --json  # alias for similar; no model load
+myvec query --spec query.json --top 20 --json
+```
+
+`semantic` ranks best matching chunks by vector score. `path` matches **all** case-insensitive whitespace-separated substrings in indexed filenames/folders, without reading file content or loading a model. Path matches have zero line numbers even when `kind=text`; they are metadata matches, not content evidence. `hybrid` fuses semantic top-K and matching paths using reciprocal ranks (RRF, constant 60); its scores are fused ranks, not cosine scores. This is filename/semantic fusion, not BM25 full-text search.
+
+`file2file`/`similar` averages an indexed file's chunk vectors and finds other files' best matching chunks. It excludes the source file and does not require that the model be installed. Large multi-topic files can lose topic detail in this centroid; chunk-to-chunk comparison is not implemented.
+
+A query specification supports `text`, `file`, `path` leaves and nested `union`, `intersection`, `difference`. For example, find files similar to a reference document, limited to a folder, excluding generated reports:
+
+```json
+{
+  "op": "difference",
+  "args": [
+    {"op": "intersection", "args": [
+      {"op": "file", "path": "/absolute/docs/reference.md", "top": 50, "min_score": 0.3},
+      {"op": "path", "under": "/absolute/docs", "kind": "text"}
+    ]},
+    {"op": "path", "query": "generated"}
+  ]
+}
+```
+
+Use `{"op":"text","query":"database retries","top":50,"min_score":0.3}` for a natural-language leaf. Text/file leaf `top` defaults to 20 (maximum 10,000); `min_score` is optional. These define finite retrieved sets: subtracting a text leaf removes its retrieved matches, not every file that might relate to its meaning. `path` leaves include every matching indexed path, so they are useful for exact folder/kind exclusions. `under` must be absolute and uses path-component boundaries, not string prefixes. Empty path queries match all indexed files (subject to other filters).
+
+Operations identify files by stored absolute path. Intersection/difference preserve the first operand's ranking and evidence; difference requires exactly two operands. Union deduplicates paths, uses RRF ranking, and prefers a matching text chunk over metadata-only evidence. Output `--top` is applied **after** evaluating the sets. Nodes are limited to 128 and depth to 16. `--spec -` reads JSON from stdin, useful for agents. Metadata/file-only trees never start inference. Query specifications must fit within 1 MiB.
+
+## Background resource controls
+
+```sh
+myvec index --all --background                 # lower process priority; 25% inference duty cycle
+myvec index ~/Documents --background --duty-cycle 10
+myvec control pause                            # release model weights and stop inference
+myvec control resume                           # reload lazily when inference is needed
+myvec control limit --duty-cycle 20             # change an active worker's budget
+myvec control stop                             # exit without committing half a file or pruning
+myvec stats --json
+```
+
+Foreground scans default to a 100% duty cycle. At 25%, a worker rests for three times each measured inference duration; it checks controls during those rests. This limits continuous inference rather than guaranteeing a GPU-utilization percentage, wattage, thermal ceiling or scan/IO budget. Unix background workers also use a lower CPU scheduling priority. Controls are cooperative: an in-flight model load/inference finishes before pausing/stopping. Pausing drops the native model (and ends the optional Python bridge); it cannot stop an externally managed HTTP server. Resuming has a model-loading cost. Stats report requested action, budget and actual `paused`/`stopped` state. Search remains available while paused.
+
+Already committed files are retained on stop, and partial file replacements are discarded. Changed text files reuse unchanged chunk embeddings by a 32-byte content hash; model/encoding/chunk settings still must match the index. Legacy chunks without hashes remain searchable and gain reuse metadata when next reindexed. This adds about 32 bytes per hashed chunk without storing its original text. Native ranking scans exact scores in document order and keeps only top-K file candidates, avoiding a candidate map/full sort proportional to all files; vector scanning is still linear in chunk count.
+
+Automatic filesystem watching, battery/thermal-aware scheduling, automatic search priority and an idle resident inference service are **not implemented**. Background mode currently performs a bounded scan and exits; it is not an always-on index watcher. No cross-runtime speed or energy advantage has been established.
+
 ## Install
 
 Requirements: Rust stable and curl. Download the text-only Q8 model once (about 300 MB):
