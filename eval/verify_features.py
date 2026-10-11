@@ -84,6 +84,27 @@ def main():
         assert len(file_only["hits"]) == 1
         assert file_only["hits"][0]["path"] == str(timeout)
         assert file_only["hits"][0]["source_state"] == "verified"
+        for level in ("chunk", "file", "folder"):
+            result = json.loads(run("--model-file", root / "missing.gguf", "retrieve",
+                                    "--file", retry, "--avoid-file", docs / "trip.txt",
+                                    "--under", docs, "--kind", "text", "--level", level,
+                                    "--context-chars", "200", "--json"))
+            assert result["level"] == level
+            assert result["evaluated_candidates"] == 1
+            assert result["evaluated_chunks"] == 1
+            assert len(result["hits"]) == 1
+            hit = result["hits"][0]
+            assert hit["member_files"] == hit["member_chunks"] == 1
+            if level == "chunk":
+                assert hit["source_state"] == "verified"
+            else:
+                assert hit["source_state"] == "aggregate_not_checked"
+                assert "context" not in hit and "chunk_index" not in hit
+                assert result["context_chars_used"] == 0
+                assert hit["path"] == str(docs if level == "folder" else timeout)
+        folder_text = json.loads(run("retrieve", "network retry", "--level", "folder", "--json"))
+        assert folder_text["hits"][0]["member_files"] == 3
+        assert folder_text["hits"][0]["member_chunks"] == refreshed["chunks"]
         saved = timeout.read_text()
         timeout.write_text(saved + " changed after indexing")
         stale = json.loads(run("--model-file", root / "missing.gguf", "retrieve",
@@ -150,6 +171,7 @@ def main():
                           "multi_basis_full_scan_and_context_budget": True,
                           "file_only_retrieval_without_model": True,
                           "stale_evidence_withheld": True,
+                          "chunk_file_folder_levels_without_model": True,
                           "atomic_stop_preserved_index": True,
                           "ordered_scan_uses_no_temp_sort": True}, indent=2))
 

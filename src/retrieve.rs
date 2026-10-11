@@ -21,6 +21,14 @@ pub enum Combine {
     Strict,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    Chunk,
+    File,
+    Folder,
+}
+
 #[derive(Args)]
 pub struct Options {
     /// First positive text criterion; omit for file-only retrieval.
@@ -64,6 +72,9 @@ pub struct Options {
     /// Allow multiple matching chunks from the same file.
     #[arg(long)]
     pub chunks: bool,
+    /// Rank chunks, whole-file centroids, or immediate-parent folder centroids.
+    #[arg(long, value_enum, conflicts_with = "chunks")]
+    pub level: Option<Level>,
     /// Optional upper bound on final composite distance before diversity.
     #[arg(long)]
     pub max_distance: Option<f32>,
@@ -123,6 +134,8 @@ pub struct Evidence {
     pub criterion_distances: Vec<f32>,
     pub selection_distance: f32,
     pub indexed_hash: String,
+    pub member_files: usize,
+    pub member_chunks: usize,
     pub source_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
@@ -132,6 +145,9 @@ pub struct Evidence {
 #[derive(Serialize)]
 pub struct Response {
     pub score_kind: &'static str,
+    pub level: &'static str,
+    pub aggregation: &'static str,
+    pub evaluated_candidates: usize,
     pub combine: Combine,
     pub criteria: Vec<Criterion>,
     pub avoid_weight: f32,
@@ -253,37 +269,78 @@ pub fn run(
     }
     let mut evaluated = 0;
     let pool_limit = options.pool.max(options.top);
-    let hits = store.rank_by(
-        pool_limit,
-        !options.chunks,
-        |path, kind| {
-            !source_files.contains(path)
-                && under
-                    .as_ref()
-                    .is_none_or(|p| Path::new(path).starts_with(p))
-                && options.kind.as_ref().is_none_or(|k| k == kind)
-                && !excluded.iter().any(|p| Path::new(path).starts_with(p))
-        },
-        |blob| {
-            evaluated += 1;
-            let v = unpack_normalized(blob, enc, dim)?;
-            let d: Vec<_> = vectors
-                .iter()
-                .map(|basis| 1.0 - cosine(&v, basis))
-                .collect();
-            Ok(-composite(
-                &d,
-                positives,
-                options.combine,
-                options.avoid_weight,
-            ))
-        },
-    )?;
-    let pool_size = hits.len();
+    let mut accept = |path: &str, kind: &str| {
+        !source_files.contains(path)
+            && under
+                .as_ref()
+                .is_none_or(|p| Path::new(path).starts_with(p))
+            && options.kind.as_ref().is_none_or(|k| k == kind)
+            && !excluded.iter().any(|p| Path::new(path).starts_with(p))
+    };
+    let score = |v: &[f32]| {
+        let d: Vec<_> = vectors.iter().map(|basis| 1.0 - cosine(v, basis)).collect();
+        -composite(&d, positives, options.combine, options.avoid_weight)
+    };
+    let aggregate = matches!(options.level, Some(Level::File | Level::Folder));
+    let (records, evaluated_candidates) = if aggregate {
+        let (records, chunks, count) = crate::hierarchy::rank(
+            store,
+            enc,
+            dim,
+            options.level == Some(Level::Folder),
+            pool_limit,
+            &mut accept,
+            score,
+        )?;
+        evaluated = chunks;
+        (records, count)
+    } else {
+        let mut last_path = String::new();
+        let mut file_count = 0;
+        let hits = store.rank_by(
+            pool_limit,
+            !options.chunks && options.level != Some(Level::Chunk),
+            |path, kind| {
+                let accepted = accept(path, kind);
+                if accepted && last_path != path {
+                    last_path = path.to_owned();
+                    file_count += 1;
+                }
+                accepted
+            },
+            |blob| {
+                evaluated += 1;
+                Ok(score(&unpack_normalized(blob, enc, dim)?))
+            },
+        )?;
+        let count = if options.chunks || options.level == Some(Level::Chunk) {
+            evaluated
+        } else {
+            file_count
+        };
+        let mut records = Vec::new();
+        for hit in hits {
+            let (blob, hash) = store.chunk_record(&hit.path, hit.chunk_index.unwrap())?;
+            records.push(crate::hierarchy::Representative {
+                hit,
+                vector: unpack_normalized(&blob, enc, dim)?,
+                hash,
+                files: 1,
+                chunks: 1,
+            });
+        }
+        (records, count)
+    };
+    let pool_size = records.len();
     let mut candidates = Vec::new();
-    for hit in hits {
-        let (blob, hash) = store.chunk_record(&hit.path, hit.chunk_index.unwrap())?;
-        let v = unpack_normalized(&blob, enc, dim)?;
+    for record in records {
+        let crate::hierarchy::Representative {
+            hit,
+            vector: v,
+            hash,
+            files,
+            chunks,
+        } = record;
         let distances: Vec<_> = vectors
             .iter()
             .map(|basis| 1.0 - cosine(&v, basis))
@@ -299,6 +356,8 @@ pub fn run(
                 criterion_distances: distances,
                 selection_distance: distance,
                 indexed_hash: hash,
+                member_files: files,
+                member_chunks: chunks,
                 source_state: "not_checked".into(),
                 context: None,
                 context_truncated: false,
@@ -347,6 +406,10 @@ pub fn run(
         .transpose()?
         .unwrap_or(2);
     for (e, _) in &mut selected {
+        if aggregate {
+            e.source_state = "aggregate_not_checked".into();
+            continue;
+        }
         if e.hit.kind != "text" {
             e.source_state = "filename_or_media_only".into();
             continue;
@@ -381,6 +444,19 @@ pub fn run(
     tx.commit()?;
     Ok(Response {
         score_kind: "negative_composite_cosine_distance",
+        level: match options.level {
+            Some(Level::File) => "file",
+            Some(Level::Folder) => "folder",
+            Some(Level::Chunk) => "chunk",
+            None if options.chunks => "chunk",
+            None => "file_best_chunk",
+        },
+        aggregation: match options.level {
+            Some(Level::File) => "normalized_chunk_sum",
+            Some(Level::Folder) => "equal_file_weight_immediate_parent",
+            _ => "none",
+        },
+        evaluated_candidates,
         combine: options.combine,
         criteria,
         avoid_weight: options.avoid_weight,
@@ -457,6 +533,91 @@ mod tests {
             _ => vec![-1., 0.],
         })
     }
+    #[test]
+    fn levels_rank_different_units_and_equal_weight_files() {
+        for enc in [Encoding::F32, Encoding::Q8] {
+            let mut store = Store::open(Path::new(":memory:")).unwrap();
+            for (path, values) in [
+                ("/mixed/long.md", vec![vec![1., 0.]; 10]),
+                ("/mixed/short.md", vec![vec![0., 1.]]),
+                ("/focused/a.md", vec![vec![0.8, 0.6]]),
+                ("/focused/nested/a.md", vec![vec![0., 1.]]),
+                (
+                    "/passages/a.md",
+                    vec![vec![1., 0.], vec![0., 1.], vec![0., 1.]],
+                ),
+            ] {
+                let chunks: Vec<_> = values
+                    .into_iter()
+                    .map(|v| (1, 1, crate::vector::pack(&v, enc), None))
+                    .collect();
+                store.replace(path, "hash", "text", 1, &chunks).unwrap();
+            }
+            let search = |args: &[&str]| run(&options(args), &store, 2, enc, &mut embed).unwrap();
+            let chunks = search(&["A", "--level", "chunk"]);
+            assert_eq!(chunks.evaluated_chunks, 16);
+            assert_eq!(chunks.evaluated_candidates, 16);
+            let files = search(&["A", "--level", "file", "--context-chars", "100"]);
+            assert_eq!(files.evaluated_candidates, 5);
+            let mixed = files
+                .hits
+                .iter()
+                .find(|e| e.hit.path == "/mixed/long.md")
+                .unwrap();
+            assert_eq!(mixed.member_chunks, 10);
+            assert!(mixed.hit.chunk_index.is_none());
+            assert!(mixed.context.is_none());
+            assert_eq!(mixed.source_state, "aggregate_not_checked");
+            let passage = files
+                .hits
+                .iter()
+                .find(|e| e.hit.path == "/passages/a.md")
+                .unwrap();
+            assert!(passage.distance > 0.5);
+            let best = search(&["A"]);
+            assert!(
+                best.hits
+                    .iter()
+                    .find(|e| e.hit.path == "/passages/a.md")
+                    .unwrap()
+                    .distance
+                    < 0.001
+            );
+            let folders = search(&["A", "--level", "folder"]);
+            assert_eq!(folders.evaluated_candidates, 4);
+            assert_eq!(folders.hits[0].hit.path, "/focused");
+            let bounded = search(&["A", "--level", "folder", "--pool", "1", "--top", "1"]);
+            assert_eq!(bounded.hits[0].hit.path, folders.hits[0].hit.path);
+            assert_eq!(bounded.pool_size, 1);
+            assert_eq!(bounded.evaluated_candidates, 4);
+            let mixed = folders
+                .hits
+                .iter()
+                .find(|e| e.hit.path == "/mixed")
+                .unwrap();
+            assert_eq!((mixed.member_files, mixed.member_chunks), (2, 11));
+            assert!((mixed.distance - (1. - 0.5f32.sqrt())).abs() < 0.005);
+            let filtered = search(&["A", "--level", "folder", "--exclude", "/mixed/long.md"]);
+            let mixed = filtered
+                .hits
+                .iter()
+                .find(|e| e.hit.path == "/mixed")
+                .unwrap();
+            assert_eq!(mixed.member_files, 1);
+            assert!((mixed.distance - 1.).abs() < 0.001);
+            assert_eq!(filtered.evaluated_chunks, 6);
+            assert_ne!(
+                mixed.indexed_hash,
+                folders
+                    .hits
+                    .iter()
+                    .find(|e| e.hit.path == "/mixed")
+                    .unwrap()
+                    .indexed_hash
+            );
+        }
+    }
+
     #[test]
     fn full_scan_finds_compromise_outside_each_leaf_top_one() {
         for enc in [Encoding::F32, Encoding::Q8] {

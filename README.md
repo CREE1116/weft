@@ -48,6 +48,18 @@ For normalized reconstructed candidate vectors, let `d(C,A) = 1 - cosine(C,A)`. 
 
 The default keeps one best matching chunk per file. `--chunks` allows several evidence chunks from the same file. Exact composite-score top-K selection scans all eligible chunks and uses bounded candidate memory. There is no per-criterion top-K cutoff. The stored vectors are still Q8 by default; "exact" refers to ranking those reconstructed vectors, not equivalence to an unquantized model.
 
+Choose the result unit explicitly:
+
+```sh
+myvec retrieve "retry policy" --level folder --under ~/Documents --kind text --json
+myvec retrieve "retry policy" --level file --under ~/Documents/projects --kind text --json
+myvec retrieve "retry policy" --level chunk --under ~/Documents/projects --kind text --context-chars 4000 --json
+```
+
+`--level chunk` scores individual chunks (`--chunks` is the compatible older spelling). `--level file` scores the normalized sum of stored chunk vectors, which represents the whole document rather than its best passage. `--level folder` scores the normalized sum of normalized file representatives with equal file weight, grouping **immediate parent directories**, not entire recursive subtrees. Nested directories are separate results. All hard filters and reference-file exclusions apply to member files before aggregation. These modes use the same multi-criterion distance formula and optional diversity. Whole-document representatives may dilute a small relevant passage; use chunk search for precise evidence.
+
+JSON adds `level`, `aggregation`, `evaluated_candidates` and per-hit `member_files`/`member_chunks`. Default best-chunk hits report one selected file/chunk, not full document membership. Aggregate hits have line coordinates zero, no chunk index, no excerpt and `source_state=aggregate_not_checked`, even when a context budget is requested. Their stored hashes identify the indexed file version or folder membership snapshot, not a live source verification. Drill down with `--under FOLDER --level chunk --context-chars N` for verified evidence. Representatives are computed from the existing index: no extra model inference for file-only criteria, no additional stored vectors, source copies or schema migration. File mode holds one current sum plus the bounded candidate pool; folder mode additionally holds one dimension-sized sum per eligible parent directory. It scans existing chunks for each request rather than caching a second index. See [search-unit verification](eval/SEARCH_LEVEL_RESULTS.md) for ranking and CLI checks.
+
 Optional `--diversity` greedily penalizes cosine similarity to already selected evidence; `--dedup-cosine` suppresses candidates similar to already selected vectors. Both operate only within the exact composite-score pool (`--pool`, default 100, enlarged to at least `--top`). They are disabled by default and may return fewer results. They improve variety, not guaranteed relevance. Without either, retrieval returns exact composite top-K subject to filters and any distance cap.
 
 JSON includes criteria in the order corresponding to each hit's `criterion_distances`, composite `distance`, diversity-adjusted `selection_distance`, the precise `chunk_index`, and indexed file hash. The inherited `score` is the **negative composite distance**; this is identified by `score_kind`. Lower distances are better. Diversity selection order can differ from raw distance order.
@@ -58,7 +70,7 @@ This supports agent search refinement using positive/negative examples, multi-co
 
 ## Search modes and file sets
 
-An installed-CLI experiment on file/folder representatives and change-direction search is recorded in [hierarchical vector results](eval/HIERARCHY_RESULTS.md). Comparing indexed before/after files with `retrieve --file AFTER --avoid-file BEFORE` can find material aligned with changed emphasis, without loading a model. Representative displacement is not edited-text volume or factual importance. Automatic revision history and a folder-vector API are not implemented.
+An installed-CLI experiment on file/folder representatives and change-direction search is recorded in [hierarchical vector results](eval/HIERARCHY_RESULTS.md). Comparing indexed before/after files with `retrieve --file AFTER --avoid-file BEFORE` can find material aligned with changed emphasis, without loading a model. Representative displacement is not edited-text volume or factual importance. Automatic revision history is not implemented. Folder result representatives are now available through `retrieve --level folder`.
 
 ```sh
 myvec search "재시도 정책" --mode semantic --json

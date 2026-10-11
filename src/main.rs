@@ -1,5 +1,6 @@
 mod chunk;
 mod embed;
+mod hierarchy;
 mod native;
 mod query;
 mod resource;
@@ -297,14 +298,25 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 for evidence in response.hits {
-                    println!(
-                        "{:.4}\t{}:{}-{}\t{}",
-                        evidence.distance,
-                        evidence.hit.path,
-                        evidence.hit.start_line,
-                        evidence.hit.end_line,
-                        evidence.source_state
-                    );
+                    if evidence.hit.chunk_index.is_none() {
+                        println!(
+                            "{:.4}\t{}\t{} files / {} chunks\t{}",
+                            evidence.distance,
+                            evidence.hit.path,
+                            evidence.member_files,
+                            evidence.member_chunks,
+                            evidence.source_state
+                        );
+                    } else {
+                        println!(
+                            "{:.4}\t{}:{}-{}\t{}",
+                            evidence.distance,
+                            evidence.hit.path,
+                            evidence.hit.start_line,
+                            evidence.hit.end_line,
+                            evidence.source_state
+                        );
+                    }
                     if let Some(context) = evidence.context {
                         println!("{context}");
                     }
