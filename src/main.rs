@@ -1,4 +1,5 @@
 mod chunk;
+mod document;
 mod embed;
 mod hierarchy;
 mod native;
@@ -13,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use embed::{Embedder, Input};
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use store::{Hit, Store};
@@ -145,6 +147,14 @@ enum Cmd {
         #[arg(long, requires = "under", value_parser = ["text", "path", "image", "audio", "video"])]
         kind: Option<String>,
     },
+    /// Extract document text and optionally export embedded images, without inference.
+    Extract {
+        file: PathBuf,
+        #[arg(long)]
+        images_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Compare truncated/quantized vectors against FP32 768-dim, with labeled queries.
     Bench {
         #[arg(long)]
@@ -158,6 +168,31 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Cmd::Extract {
+        file,
+        images_dir,
+        json,
+    } = &cli.command
+    {
+        let mut bytes = Vec::new();
+        std::fs::File::open(file)?
+            .take(document::INPUT_LIMIT as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        let mut extracted = document::extract(file, &bytes, true)?;
+        if let Some(dir) = images_dir {
+            extracted.export_images(dir)?;
+        }
+        if *json {
+            println!("{}", serde_json::to_string_pretty(&extracted)?);
+        } else {
+            println!("{}", extracted.text);
+            eprintln!("embedded images: {}", extracted.images.len());
+            for warning in extracted.warnings {
+                eprintln!("{warning}");
+            }
+        }
+        return Ok(());
+    }
     let mut store = Store::open(&cli.db)?;
     match &cli.command {
         Cmd::Index {
@@ -325,6 +360,17 @@ fn main() -> Result<()> {
                             evidence.source_state
                         );
                     }
+                    if evidence.hit.line_kind == "extracted_text" {
+                        println!(
+                            "extracted text lines; source: {}",
+                            evidence
+                                .source_locations
+                                .iter()
+                                .map(|l| l.label.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                     if let Some(context) = evidence.context {
                         println!("{context}");
                     }
@@ -462,6 +508,7 @@ fn main() -> Result<()> {
                 println!("scope: {scope}");
             }
         }
+        Cmd::Extract { .. } => unreachable!(),
         Cmd::Bench { queries, top, json } => bench(&cli, &store, queries, *top, *json)?,
     }
     Ok(())
@@ -523,6 +570,9 @@ fn show(hits: Vec<Hit>, json: bool) -> Result<()> {
                 "{:.4}\t{}:{}-{}\t{}",
                 h.score, h.path, h.start_line, h.end_line, h.kind
             );
+            if h.line_kind == "extracted_text" {
+                println!("coordinates: extracted text lines");
+            }
         }
     }
     Ok(())
@@ -696,7 +746,7 @@ fn index(
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
-        let mut kind = if chunk::supported(path) {
+        let mut kind = if chunk::supported(path) || document::format(path).is_some() {
             "text"
         } else if media {
             match chunk::media_kind(path) {
@@ -718,7 +768,9 @@ fn index(
                 continue;
             }
         };
-        let max_size = if kind == "text" {
+        let max_size = if kind == "text" && document::format(path).is_some() {
+            document::INPUT_LIMIT
+        } else if kind == "text" {
             2 * 1024 * 1024
         } else {
             64 * 1024 * 1024
@@ -776,7 +828,10 @@ fn index(
             filename_only += 1;
             data.clear();
         }
-        if kind == "text" && (data.contains(&0) || std::str::from_utf8(&data).is_err()) {
+        if kind == "text"
+            && document::format(path).is_none()
+            && (data.contains(&0) || std::str::from_utf8(&data).is_err())
+        {
             if !all_files {
                 skipped += 1;
                 continue;
@@ -785,7 +840,7 @@ fn index(
             filename_only += 1;
             data.clear();
         }
-        let hash = if kind == "path" {
+        let mut hash = if kind == "path" {
             let signature = format!(
                 "filename-v1:{path_str}:{}:{:?}",
                 metadata.len(),
@@ -799,14 +854,34 @@ fn index(
             skipped += 1;
             continue;
         }
-        let segments: Vec<(usize, usize, Input)> = if kind == "text" {
-            let text = match std::str::from_utf8(&data) {
-                Ok(s) => s,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
+        let extracted = if kind == "text" {
+            match document::extract(path, &data, false) {
+                Ok(doc) if !doc.text.trim().is_empty() => Some(doc),
+                outcome => {
+                    if let Err(error) = outcome {
+                        eprintln!("{}: extraction failed: {error}", path.display());
+                        errors += 1;
+                    }
+                    if !all_files {
+                        skipped += 1;
+                        continue;
+                    }
+                    kind = "path";
+                    filename_only += 1;
+                    let signature = format!(
+                        "filename-v1:{path_str}:{}:{:?}",
+                        metadata.len(),
+                        metadata.modified().ok()
+                    );
+                    hash = blake3::hash(signature.as_bytes()).to_hex().to_string();
+                    None
                 }
-            };
+            }
+        } else {
+            None
+        };
+        let segments: Vec<(usize, usize, Input)> = if let Some(extracted) = &extracted {
+            let text = &extracted.text;
             chunk::split(text, chunk_chars, overlap)
                 .into_iter()
                 .map(|part| {

@@ -140,6 +140,7 @@ pub struct Evidence {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     pub context_truncated: bool,
+    pub source_locations: Vec<crate::document::Location>,
 }
 
 #[derive(Serialize)]
@@ -361,6 +362,7 @@ pub fn run(
                 source_state: "not_checked".into(),
                 context: None,
                 context_truncated: false,
+                source_locations: Vec::new(),
             },
             v,
         ));
@@ -421,10 +423,11 @@ pub fn run(
             continue;
         }
         match excerpt(e, chunk_chars, overlap, remaining) {
-            Ok(Some((text, truncated))) => {
+            Ok(Some((text, truncated, locations))) => {
                 remaining -= text.chars().count();
                 e.context = Some(text);
                 e.context_truncated = truncated;
+                e.source_locations = locations;
                 e.source_state = "verified".into();
             }
             Ok(None) => e.source_state = "changed_since_index".into(),
@@ -474,16 +477,18 @@ fn excerpt(
     chars: usize,
     overlap: usize,
     budget: usize,
-) -> Result<Option<(String, bool)>> {
+) -> Result<Option<(String, bool, Vec<crate::document::Location>)>> {
     let mut bytes = Vec::new();
     std::fs::File::open(&e.hit.path)?
-        .take(2 * 1024 * 1024 + 1)
+        .take(crate::document::INPUT_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > 2 * 1024 * 1024 || blake3::hash(&bytes).to_hex().as_str() != e.indexed_hash {
+    if bytes.len() > crate::document::INPUT_LIMIT
+        || blake3::hash(&bytes).to_hex().as_str() != e.indexed_hash
+    {
         return Ok(None);
     }
-    let text = std::str::from_utf8(&bytes)?;
-    let chunks = chunk::split(text, chars, overlap);
+    let extracted = crate::document::extract(Path::new(&e.hit.path), &bytes, false)?;
+    let chunks = chunk::split(&extracted.text, chars, overlap);
     let Some(chunk) = e.hit.chunk_index.and_then(|i| chunks.get(i)) else {
         return Ok(None);
     };
@@ -491,7 +496,16 @@ fn excerpt(
         return Ok(None);
     }
     let truncated = chunk.text.chars().count() > budget;
-    Ok(Some((chunk.text.chars().take(budget).collect(), truncated)))
+    let locations = extracted
+        .locations
+        .into_iter()
+        .filter(|l| l.start_line <= chunk.end && l.end_line >= chunk.start)
+        .collect();
+    Ok(Some((
+        chunk.text.chars().take(budget).collect(),
+        truncated,
+        locations,
+    )))
 }
 
 #[cfg(test)]

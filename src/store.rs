@@ -11,6 +11,7 @@ pub struct Store {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Hit {
+    pub line_kind: &'static str,
     pub path: String,
     pub kind: String,
     pub score: f32,
@@ -240,6 +241,7 @@ impl Store {
                 bail!("nonfinite retrieval score");
             }
             let hit = Hit {
+                line_kind: crate::document::line_kind(&path, &kind),
                 path,
                 kind,
                 score,
@@ -283,6 +285,7 @@ impl Store {
                 continue;
             }
             out.push(Hit {
+                line_kind: "none",
                 path,
                 kind: record_kind,
                 score: 1.0,

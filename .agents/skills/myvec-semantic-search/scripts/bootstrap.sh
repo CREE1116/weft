@@ -24,7 +24,7 @@ if [ ! -x "$CLI" ]; then CLI=$(command -v myvec || true); fi
 compatible() {
   [ -n "$CLI" ] && [ -x "$CLI" ] || return 1
   "$CLI" --version 2>/dev/null | awk '
-    $1 == "myvec" && split($2, v, ".") >= 3 && (v[1] > 0 || v[2] >= 5) { ok=1 }
+    $1 == "myvec" && split($2, v, ".") >= 3 && (v[1] > 0 || v[2] >= 6) { ok=1 }
     END { exit !ok }'
 }
 if [ "$REBUILD" -eq 1 ] || ! compatible; then
@@ -56,7 +56,7 @@ if [ "$REBUILD" -eq 1 ] || ! compatible; then
     "$SOURCE/scripts/install.sh" --no-index
   fi
   CLI="$INSTALL_ROOT/bin/myvec"
-  compatible || { printf 'Installed myvec is incompatible; version 0.5.0 or newer is required.\n' >&2; exit 1; }
+  compatible || { printf 'Installed myvec is incompatible; version 0.6.0 or newer is required.\n' >&2; exit 1; }
 else
   "$SCRIPT_DIR/setup-model.sh"
 fi

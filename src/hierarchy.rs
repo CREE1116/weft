@@ -74,6 +74,7 @@ pub fn rank(
         } else {
             keep(Representative {
                 hit: Hit {
+                    line_kind: "aggregate",
                     path: group.path,
                     kind: group.kind,
                     score: 0.,
@@ -127,6 +128,7 @@ pub fn rank(
     for (path, (sum, files, chunks, hash)) in folders {
         keep(Representative {
             hit: Hit {
+                line_kind: "aggregate",
                 path,
                 kind: "folder".into(),
                 score: 0.,

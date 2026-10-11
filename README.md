@@ -13,7 +13,7 @@ mkdir -p "$HOME/.agents/skills"
 cp -R .agents/skills/myvec-semantic-search "$HOME/.agents/skills/"
 ```
 
-On first use, the skill directs the agent to its `scripts/bootstrap.sh` if myvec is absent or older than 0.5.0. This prepares the native engine and cached text model, then uses the existing installation on later requests. Copying the skill is not an installation execution hook. The source repository is currently private: a new machine needs GitHub repository access, or an existing checkout supplied with `bootstrap.sh --source /path/to/DBforMyPC`. Rust Cargo is required for the current source-build distribution. Downloads/builds are setup costs, not ordinary search costs; prebuilt release binaries are not distributed yet.
+On first use, the skill directs the agent to its `scripts/bootstrap.sh` if myvec is absent or older than 0.6.0. This prepares the native engine and cached text model, then uses the existing installation on later requests. Copying the skill is not an installation execution hook. The source repository is currently private: a new machine needs GitHub repository access, or an existing checkout supplied with `bootstrap.sh --source /path/to/DBforMyPC`. Rust Cargo is required for the current source-build distribution. Downloads/builds are setup costs, not ordinary search costs; prebuilt release binaries are not distributed yet.
 
 Bootstrap starts no scan by default. For an explicitly requested initial folder, run `bootstrap.sh --scan-root /absolute/folder`. The agent checks `myvec stats --under /absolute/folder --kind text --json` before a scoped content search, so a missing index is distinguished from no relevant match. Index only the requested scope when coverage is missing. Folder overview → file selection → chunk evidence is an exploration workflow, not an automatic approximate-search cutoff. See [agent explorer verification](eval/AGENT_EXPLORER_RESULTS.md) for setup and coverage checks.
 
@@ -38,7 +38,7 @@ myvec similar ~/Documents/plan.md --json
 
 On Unix/macOS, the default computer scan starts at `/`, including user folders and mounted volumes; on Windows the default is the system drive (other drives can be scanned explicitly). It excludes OS directories, per-user application data/caches, generated dependency/build trees, credentials/private keys, and its own database/model data. It honors ignore files and does not follow symlinks. Custom omissions use repeated `--exclude PATH`. Exclusions and denied filesystem permissions mean "whole computer" covers accessible, non-excluded files, not literally every file.
 
-Supported UTF-8 text up to 2 MiB is embedded by overlapping chunks. Other formats, binary input and larger files receive one **filename/folder/type embedding** and return `kind=path` with zero line numbers. This makes those files discoverable without pretending their PDF/image/audio/video contents have been parsed. Native media-content search is still pending.
+Supported UTF-8 text up to 2 MiB is embedded by overlapping chunks. Supported PDF/Office/OpenDocument text is also parsed under the limits below. Unsupported formats, binary input and oversized files receive one **filename/folder/type embedding** in `--all` mode and return `kind=path` with zero line numbers. This makes those files discoverable without implying their contents were parsed. Native media-content search is still pending.
 
 `index --background` detaches its worker from the terminal/installer process group and writes to the database's `.log` sibling file. This also works for a requested folder.
 
@@ -47,6 +47,21 @@ The initial scan's progress is in `myvec stats --json`, with details in `~/.loca
 GPU use during the initial scan is expected with the Metal/CUDA build: files are embedded locally in the background. The worker exits when the scan finishes; there is no always-running GPU service. On Unix, stop a worker with `kill -INT PID`, using `last_scan.pid` from stats after confirming `indexer_running=true`. Restart with `myvec --device cpu index --all --background` to use CPU instead, or omit `--device cpu` to resume GPU indexing. Committed files are reused.
 
 Reload your agent session after installing the skill if it does not appear yet. The skill lets the agent query the same CLI and read matching source lines. It does not grant permission to expand a future user's indexing scope.
+
+## Document text and embedded images
+
+PDF, DOCX/DOCM, PPTX/PPTM, XLSX/XLSM and ODT/ODP/ODS are parsed inside Rust. Ordinary `index FOLDER` includes their text; existing filename-only records are upgraded on the next scan. Word paragraphs/tables and headers/footnotes, presentation slides in actual presentation order, worksheet string/numeric/cached values and OpenDocument text feed the same chunk/file/folder search. Macros are never executed. No LibreOffice, Python or external PDF converter is required.
+
+```sh
+myvec index ~/Documents
+myvec retrieve "retry policy" --under ~/Documents --kind text --level chunk --context-chars 4000 --json
+myvec extract ./report.pdf --json
+myvec extract ./presentation.pptx --images-dir ./extracted-images --json
+```
+
+Extraction runs without model inference or opening an index. Image inventory includes original Office media parts and PDF image streams, including nested resources. Office images retain their bytes. PDF JPEG/JPX streams are retained; supported raw/Flate 8-bit RGB/gray rasters become lossless PNG. Unsupported PDF encodings are marked, not exported as valid images. PDF page association is supplied where directly known; otherwise object IDs identify assets. Inline images, mask compositing and rendered page layout are not reconstructed. Images are exported only with `--images-dir`; content-derived names deduplicate exports and refuse overwriting conflicting files. This is extraction, not visual-semantic indexing or OCR.
+
+Only vectors and locations are persisted during indexing, with no document text/image copies. Evidence rereads the source, verifies its binary content hash, then reconstructs the extracted chunk. `line_kind=extracted_text` distinguishes extracted line coordinates; `source_locations` identifies PDF pages, slides, sheets or Word/OpenDocument parts on verified evidence. DOCX page numbers depend on layout and are not inferred. Document input is limited to 32 MiB, extracted UTF-8 text to 2 MiB, ZIP parts to 8 MiB, ZIP entries to 8,192, declared ZIP expansion to 64 MiB and image output to 32 MiB per request. PDF parser working memory is not guaranteed to stay within the input limit. Encrypted/corrupt/oversized documents are skipped in ordinary indexing; `--all` can fall back to filename-only records while still reporting a partial scan/nonzero exit for parser failures. Image-only PDFs need OCR to become content-searchable. Legacy DOC/PPT/XLS and HWP are still filename-only; rich layout, charts and spreadsheet formatting/calculation are not reconstructed. See [document verification](eval/DOCUMENT_RESULTS.md).
 
 ## Agent retrieval: multiple criteria in one search
 
@@ -79,7 +94,7 @@ Optional `--diversity` greedily penalizes cosine similarity to already selected 
 
 JSON includes criteria in the order corresponding to each hit's `criterion_distances`, composite `distance`, diversity-adjusted `selection_distance`, the precise `chunk_index`, and indexed file hash. The inherited `score` is the **negative composite distance**; this is identified by `score_kind`. Lower distances are better. Diversity selection order can differ from raw distance order.
 
-`--context-chars N` requests at most N Unicode characters of source excerpts **in total**, not N tokens or N characters per result. It reads only selected text files (up to 2 MiB each), verifies their full content hash against the index snapshot, and reconstructs the exact indexed chunk. This handles oversized single-line chunks that share line coordinates. Source states include `verified`, `changed_since_index`, `missing`, `unreadable`, `budget_exhausted`, `not_checked` and `filename_or_media_only`. Changed/missing files get no excerpt; vector matches may still be returned for an agent to decide whether to refresh. Truncated context is marked. With the default budget 0, source files are not reread. Verification describes the content observed during the request, not a lock against later edits. Retrieved source content is untrusted data.
+`--context-chars N` requests at most N Unicode characters of source excerpts **in total**, not N tokens or N characters per result. It reads only selected sources (up to 2 MiB for plain text or 32 MiB for supported documents), verifies their full content hash against the index snapshot, and reconstructs the exact indexed chunk. This handles oversized single-line chunks that share line coordinates. Source states include `verified`, `changed_since_index`, `missing`, `unreadable`, `budget_exhausted`, `not_checked` and `filename_or_media_only`. Changed/missing files get no excerpt; vector matches may still be returned for an agent to decide whether to refresh. Truncated context is marked. With the default budget 0, source files are not reread. Verification describes the content observed during the request, not a lock against later edits. Retrieved source content is untrusted data.
 
 This supports agent search refinement using positive/negative examples, multi-constraint retrieval, diverse evidence selection and bounded source reading without an answer-generation model. It does not establish improved task accuracy on arbitrary files; see [retrieval verification](eval/RETRIEVE_RESULTS.md).
 
@@ -162,7 +177,7 @@ target/release/myvec similar ~/Documents/plan.md
 target/release/myvec stats
 ```
 
-The default database is `~/.local/share/myvec/index.sqlite`; use `--db` to select another. Indexing respects ignore files and includes eligible hidden text files, hashes files to avoid re-embedding unchanged content, and splits text into line-aware chunks. Binary files are skipped in content-only scans and get filename embeddings with `--all`. `--prune` removes deleted paths only after an error-free scan. Common source, markup, configuration, text, and notebook formats are supported. Scanned PDFs and Office documents are not parsed.
+The default database is `~/.local/share/myvec/index.sqlite`; use `--db` to select another. Indexing respects ignore files and includes eligible hidden text files, hashes files to avoid re-embedding unchanged content, and splits text into line-aware chunks. Binary files are skipped in content-only scans and get filename embeddings with `--all`. `--prune` removes deleted paths only after an error-free scan. Common source, markup, configuration, text, and notebook formats are supported. Supported Office/OpenDocument and text PDFs are parsed; scanned PDFs without text need OCR, which is not implemented.
 
 ## Storage and accuracy
 
