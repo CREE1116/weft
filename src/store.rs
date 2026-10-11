@@ -293,6 +293,26 @@ impl Store {
         }
         Ok(out)
     }
+    /// Indexed coverage only: does not walk source files or start inference.
+    pub fn coverage(&self, under: &Path, kind: Option<&str>) -> Result<(usize, usize, usize)> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.path,d.kind,COUNT(c.ordinal),COALESCE(SUM(LENGTH(c.embedding)),0)
+             FROM documents d LEFT JOIN chunks c ON c.doc_id=d.id GROUP BY d.id ORDER BY d.id",
+        )?;
+        let mut rows = stmt.query([])?;
+        let (mut files, mut chunks, mut bytes) = (0, 0, 0);
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let record_kind: String = row.get(1)?;
+            if !Path::new(&path).starts_with(under) || kind.is_some_and(|k| k != record_kind) {
+                continue;
+            }
+            files += 1;
+            chunks += row.get::<_, i64>(2)? as usize;
+            bytes += row.get::<_, i64>(3)? as usize;
+        }
+        Ok((files, chunks, bytes))
+    }
     pub fn stats(&self) -> Result<(usize, usize, usize)> {
         let files: i64 = self
             .conn
@@ -373,6 +393,36 @@ pub fn encode(v: &[f32], enc: Encoding) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn coverage_respects_components_kinds_and_empty_documents() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        for (path, kind, count) in [
+            ("/docs/a.md", "text", 2),
+            ("/docs/nested/b.md", "text", 1),
+            ("/docs/image.png", "path", 1),
+            ("/docs-other/c.md", "text", 3),
+            ("/docs/empty.md", "text", 0),
+        ] {
+            let chunks = vec![(1, 1, encode(&[1., 0.], Encoding::Q8), None); count];
+            store.replace(path, "hash", kind, 1, &chunks).unwrap();
+        }
+        assert_eq!(
+            store.coverage(Path::new("/docs"), None).unwrap(),
+            (4, 4, 24)
+        );
+        assert_eq!(
+            store.coverage(Path::new("/docs"), Some("text")).unwrap(),
+            (3, 3, 18)
+        );
+        assert_eq!(
+            store.coverage(Path::new("/docs/nested"), None).unwrap(),
+            (1, 1, 6)
+        );
+        assert_eq!(
+            store.coverage(Path::new("/missing"), None).unwrap(),
+            (0, 0, 0)
+        );
+    }
     #[test]
     fn bounded_ranking_matches_exhaustive_search_and_ties() {
         for enc in [Encoding::F32, Encoding::Q8] {

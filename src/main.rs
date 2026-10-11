@@ -19,7 +19,10 @@ use store::{Hit, Store};
 use vector::{Encoding, normalized_prefix};
 
 #[derive(Parser)]
-#[command(about = "Compact local semantic file search with EmbeddingGemma 2")]
+#[command(
+    version,
+    about = "Local file explorer for agents with EmbeddingGemma 2"
+)]
 struct Cli {
     #[arg(long, global = true, default_value_os_t = default_db())]
     db: PathBuf,
@@ -133,9 +136,14 @@ enum Cmd {
         #[arg(long, required_if_eq("action", "limit"), value_parser = clap::value_parser!(u8).range(1..=100))]
         duty_cycle: Option<u8>,
     },
+    /// Index status, optionally including folder-scoped coverage without inference.
     Stats {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        under: Option<PathBuf>,
+        #[arg(long, requires = "under", value_parser = ["text", "path", "image", "audio", "video"])]
+        kind: Option<String>,
     },
     /// Compare truncated/quantized vectors against FP32 768-dim, with labeled queries.
     Bench {
@@ -399,7 +407,16 @@ fn main() -> Result<()> {
                 .collect();
             show(hits, *json)?;
         }
-        Cmd::Stats { json } => {
+        Cmd::Stats { json, under, kind } => {
+            let scope = under.as_ref().map(|path| -> Result<serde_json::Value> {
+                let path = path.canonicalize().with_context(|| format!("cannot open scope {}", path.display()))?;
+                let (files, chunks, bytes) = store.coverage(&path, kind.as_deref())?;
+                Ok(serde_json::json!({
+                    "under": path, "kind": kind, "files": files, "chunks": chunks,
+                    "vector_bytes": bytes, "source_state": "not_checked",
+                    "state": if chunks == 0 { "no_indexed_chunks" } else { "indexed_candidates_available" },
+                }))
+            }).transpose()?;
             let (files, chunks, bytes) = store.stats()?;
             let disk_bytes = database_disk_bytes(&cli.db)?;
             let indexer_running = indexing_running(&cli.db)?;
@@ -416,6 +433,7 @@ fn main() -> Result<()> {
                     "indexer_running": indexer_running,
                     "index_action": store.setting("index_action")?,
                     "index_duty_cycle": store.setting("index_duty_cycle")?,
+                    "scope": scope,
                     }))?
                 );
                 return Ok(());
@@ -440,6 +458,9 @@ fn main() -> Result<()> {
                 println!("last scan: {last_scan}");
             }
             println!("indexer running: {indexer_running}");
+            if let Some(scope) = scope {
+                println!("scope: {scope}");
+            }
         }
         Cmd::Bench { queries, top, json } => bench(&cli, &store, queries, *top, *json)?,
     }
@@ -1055,4 +1076,15 @@ fn rank(
     let mut order: Vec<_> = best.into_iter().collect();
     order.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     Ok(order.into_iter().take(top).map(|x| x.0).collect())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn bootstrap_can_read_version_without_a_subcommand() {
+        let error = Cli::try_parse_from(["myvec", "--version"]).err().unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
 }

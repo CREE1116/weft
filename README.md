@@ -1,6 +1,21 @@
 # myvec
 
-A compact Rust CLI combining an in-process EmbeddingGemma 2 inference engine, incremental file indexer, and exact cosine vector search. The dedicated model graph runs in Rust; Candle supplies CPU, CUDA and Metal tensor/quantized kernels. The database stores paths, hashes, line ranges, and vectors without copying source files. Text inference requires no Python or server.
+A local file explorer for agents: locate relevant folders, choose files, and retrieve verified passages using semantic or filename search. A portable agent skill guides exploration and prepares the Rust engine on first use. Multi-criterion vector distances let an agent refine results with requirements and positive/negative file examples.
+
+The engine combines in-process EmbeddingGemma 2 inference, incremental indexing and exact cosine vector search. Candle supplies CPU, CUDA and Metal kernels. The index stores vectors, paths, hashes and line ranges without copying source text; native text inference needs no Python or server.
+
+## Skill-first installation
+
+Install the complete `.agents/skills/myvec-semantic-search` directory in your agent's skill directory, including `scripts` and `references`. From this checkout:
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+cp -R .agents/skills/myvec-semantic-search "$HOME/.agents/skills/"
+```
+
+On first use, the skill directs the agent to its `scripts/bootstrap.sh` if myvec is absent or older than 0.5.0. This prepares the native engine and cached text model, then uses the existing installation on later requests. Copying the skill is not an installation execution hook. The source repository is currently private: a new machine needs GitHub repository access, or an existing checkout supplied with `bootstrap.sh --source /path/to/DBforMyPC`. Rust Cargo is required for the current source-build distribution. Downloads/builds are setup costs, not ordinary search costs; prebuilt release binaries are not distributed yet.
+
+Bootstrap starts no scan by default. For an explicitly requested initial folder, run `bootstrap.sh --scan-root /absolute/folder`. The agent checks `myvec stats --under /absolute/folder --kind text --json` before a scoped content search, so a missing index is distinguished from no relevant match. Index only the requested scope when coverage is missing. Folder overview → file selection → chunk evidence is an exploration workflow, not an automatic approximate-search cutoff. See [agent explorer verification](eval/AGENT_EXPLORER_RESULTS.md) for setup and coverage checks.
 
 ## Desktop install and agent use
 

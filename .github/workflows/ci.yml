@@ -19,3 +19,4 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
       - run: cargo test --locked ${{ matrix.features }}
+      - run: python3 eval/verify_bootstrap.py

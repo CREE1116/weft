@@ -46,8 +46,25 @@ def main():
         timeout = docs / "timeout.md"
         timeout.write_text("Network timeout and retry policies must coordinate their deadlines.")
         (docs / "trip.txt").write_text("Kyoto travel budget and hotel reservations.")
+        empty = json.loads(run("--model-file", root / "missing.gguf", "stats",
+                               "--under", docs, "--kind", "text", "--json"))
+        assert empty["scope"]["state"] == "no_indexed_chunks"
+        assert empty["scope"]["files"] == empty["scope"]["chunks"] == 0
         run("index", docs)
         initial = stats()
+        covered = json.loads(run("--model-file", root / "missing.gguf", "stats",
+                                 "--under", docs, "--kind", "text", "--json"))
+        assert covered["scope"]["files"] == initial["files"]
+        assert covered["scope"]["chunks"] == initial["chunks"]
+        assert covered["scope"]["vector_bytes"] == initial["vector_bytes"]
+        assert covered["scope"]["source_state"] == "not_checked"
+        assert covered["scope"]["state"] == "indexed_candidates_available"
+        missing_scope = docs / "not-indexed"
+        missing_scope.mkdir()
+        uncovered = json.loads(run("--model-file", root / "missing.gguf", "stats",
+                                   "--under", missing_scope, "--kind", "text", "--json"))
+        assert uncovered["scope"]["state"] == "no_indexed_chunks"
+
         assert initial["files"] == 3
         retry.write_text(retry.read_text() + "\nNew retry exception: never retry invalid credentials.")
         run("index", docs)
@@ -171,6 +188,7 @@ def main():
                           "multi_basis_full_scan_and_context_budget": True,
                           "file_only_retrieval_without_model": True,
                           "stale_evidence_withheld": True,
+                          "scoped_coverage_without_inference": True,
                           "chunk_file_folder_levels_without_model": True,
                           "atomic_stop_preserved_index": True,
                           "ordered_scan_uses_no_temp_sort": True}, indent=2))

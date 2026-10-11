@@ -31,7 +31,17 @@ SKILL="$SKILL_ROOT/myvec-semantic-search/SKILL.md"
 if [ -f "$SKILL" ] && ! cmp -s "$SKILL" "$REPO_ROOT/.agents/skills/myvec-semantic-search/SKILL.md"; then
   cp "$SKILL" "$SKILL.previous.md"
 fi
-cp "$REPO_ROOT/.agents/skills/myvec-semantic-search/SKILL.md" "$SKILL"
+# Replace files atomically, including a bootstrap script that may be running.
+install_resource() {
+  if [ -f "$2" ] && cmp -s "$1" "$2"; then return; fi
+  cp "$1" "$2.new.$$"
+  mv "$2.new.$$" "$2"
+}
+install_resource "$REPO_ROOT/.agents/skills/myvec-semantic-search/SKILL.md" "$SKILL"
+mkdir -p "$SKILL_ROOT/myvec-semantic-search/scripts" "$SKILL_ROOT/myvec-semantic-search/references"
+for RESOURCE in scripts/bootstrap.sh scripts/setup-model.sh references/advanced.md; do
+  install_resource "$REPO_ROOT/.agents/skills/myvec-semantic-search/$RESOURCE" "$SKILL_ROOT/myvec-semantic-search/$RESOURCE"
+done
 printf 'Installed CLI: %s\nInstalled agent skill: %s\n' "$CLI" "$SKILL"
 if [ "$INDEX" -eq 1 ]; then
   DB="$DATA_ROOT/index.sqlite"

@@ -1,8 +1,8 @@
 [package]
 name = "myvec"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-description = "Small on-device semantic file index powered by EmbeddingGemma 2"
+description = "Local file explorer for agents powered by EmbeddingGemma 2"
 
 [features]
 default = []
