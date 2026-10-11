@@ -1,0 +1,157 @@
+{
+  "model": "EmbeddingGemma 2 text Q8 GGUF; Q8 index, 768 dimensions",
+  "chunk_chars": 400,
+  "overlap_lines": 0,
+  "measurements": [
+    {
+      "variant": "baseline",
+      "characters": 2594,
+      "chunks": 8,
+      "content_changed": false,
+      "chunk_sequence_changed": false,
+      "old_chunks_missing": 0,
+      "new_chunks_added": 0,
+      "centroid_cosine_distance": 2.220446049250313e-16,
+      "chunk_identity_change": 0.0,
+      "largest_new_chunk_nearest_old_distance": 2.220446049250313e-16,
+      "chunk_coherence": 0.8789560781563475
+    },
+    {
+      "variant": "reordered",
+      "characters": 2594,
+      "chunks": 8,
+      "content_changed": true,
+      "chunk_sequence_changed": true,
+      "old_chunks_missing": 0,
+      "new_chunks_added": 0,
+      "centroid_cosine_distance": 2.220446049250313e-16,
+      "chunk_identity_change": 0.0,
+      "largest_new_chunk_nearest_old_distance": 2.220446049250313e-16,
+      "chunk_coherence": 0.8789560781563475
+    },
+    {
+      "variant": "paraphrased",
+      "characters": 2442,
+      "chunks": 8,
+      "content_changed": true,
+      "chunk_sequence_changed": true,
+      "old_chunks_missing": 3,
+      "new_chunks_added": 3,
+      "centroid_cosine_distance": 0.011056168104111919,
+      "chunk_identity_change": 0.5454545454545454,
+      "largest_new_chunk_nearest_old_distance": 0.17732950192409513,
+      "chunk_coherence": 0.8761540120132327
+    },
+    {
+      "variant": "critical_number",
+      "characters": 2618,
+      "chunks": 8,
+      "content_changed": true,
+      "chunk_sequence_changed": true,
+      "old_chunks_missing": 3,
+      "new_chunks_added": 3,
+      "centroid_cosine_distance": 0.003568537752243195,
+      "chunk_identity_change": 0.5454545454545454,
+      "largest_new_chunk_nearest_old_distance": 0.04145780078215322,
+      "chunk_coherence": 0.8786278303479605
+    },
+    {
+      "variant": "topic_shift",
+      "characters": 2570,
+      "chunks": 8,
+      "content_changed": true,
+      "chunk_sequence_changed": true,
+      "old_chunks_missing": 2,
+      "new_chunks_added": 2,
+      "centroid_cosine_distance": 0.03275349642682723,
+      "chunk_identity_change": 0.4,
+      "largest_new_chunk_nearest_old_distance": 0.3829614745481622,
+      "chunk_coherence": 0.8623612952244688
+    },
+    {
+      "variant": "topic_added",
+      "characters": 3367,
+      "chunks": 10,
+      "content_changed": true,
+      "chunk_sequence_changed": true,
+      "old_chunks_missing": 0,
+      "new_chunks_added": 2,
+      "centroid_cosine_distance": 0.014124225538108437,
+      "chunk_identity_change": 0.19999999999999996,
+      "largest_new_chunk_nearest_old_distance": 0.3829614745481622,
+      "chunk_coherence": 0.8525461137250493
+    },
+    {
+      "variant": "duplicated",
+      "characters": 7784,
+      "chunks": 24,
+      "content_changed": true,
+      "chunk_sequence_changed": true,
+      "old_chunks_missing": 0,
+      "new_chunks_added": 16,
+      "centroid_cosine_distance": 1.1102230246251565e-16,
+      "chunk_identity_change": 0.6666666666666667,
+      "largest_new_chunk_nearest_old_distance": 2.220446049250313e-16,
+      "chunk_coherence": 0.8789560781563475
+    }
+  ],
+  "folder_aggregation": {
+    "equal_file_similarity_retry": 0.8861021587874807,
+    "equal_file_similarity_travel": 0.8861021587874807,
+    "chunk_weighted_similarity_retry": 0.9969959482862749,
+    "chunk_weighted_similarity_travel": 0.6322611045765565
+  },
+  "multi_criterion_task": [
+    {
+      "file": "corpus/engineering/database-migration.md",
+      "distance": 0.42651868,
+      "source_state": "verified",
+      "context": "# Database migration rollout\nSchema changes should use expand and contract. Add a nullable field first, deploy readers and writers, backfill records in batches, then enforce the constraint after old application versions are gone."
+    },
+    {
+      "file": "corpus/engineering/schema-backup.md",
+      "distance": 0.55465984,
+      "source_state": "verified",
+      "context": "# Schema backup procedure\nBefore a major schema change, take a verified database snapshot and test restoring it in staging. Keep the snapshot until the deployment is complete."
+    },
+    {
+      "file": "corpus/security/tls-certificates.md",
+      "distance": 0.67101896,
+      "source_state": "verified",
+      "context": "# TLS certificate renewal\nRenew certificates thirty days before expiration. Validate the new certificate chain in staging before updating production endpoints."
+    }
+  ],
+  "change_direction_related_files": [
+    {
+      "file": "corpus/travel/kyoto-budget.md",
+      "distance": -0.0973326,
+      "source_state": "not_checked",
+      "context": ""
+    },
+    {
+      "file": "corpus/travel/kyoto-weather.md",
+      "distance": -0.07586187,
+      "source_state": "not_checked",
+      "context": ""
+    },
+    {
+      "file": "corpus/travel/tokyo-budget.md",
+      "distance": -0.07036245,
+      "source_state": "not_checked",
+      "context": ""
+    },
+    {
+      "file": "corpus/travel/osaka-plan.md",
+      "distance": -0.06504768,
+      "source_state": "not_checked",
+      "context": ""
+    },
+    {
+      "file": "corpus/travel/osaka-hotel.md",
+      "distance": -0.0469687,
+      "source_state": "not_checked",
+      "context": ""
+    }
+  ],
+  "limitations": "Synthetic examples; centroid displacement is not edit count, factual importance, or a calibrated change threshold. Delta ranking is exploratory, not a guaranteed topic extractor."
+}

@@ -58,6 +58,8 @@ This supports agent search refinement using positive/negative examples, multi-co
 
 ## Search modes and file sets
 
+An installed-CLI experiment on file/folder representatives and change-direction search is recorded in [hierarchical vector results](eval/HIERARCHY_RESULTS.md). Comparing indexed before/after files with `retrieve --file AFTER --avoid-file BEFORE` can find material aligned with changed emphasis, without loading a model. Representative displacement is not edited-text volume or factual importance. Automatic revision history and a folder-vector API are not implemented.
+
 ```sh
 myvec search "재시도 정책" --mode semantic --json
 myvec search "retry .rs" --mode path --json
