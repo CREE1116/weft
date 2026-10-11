@@ -3,6 +3,7 @@ mod embed;
 mod native;
 mod query;
 mod resource;
+mod retrieve;
 mod scan;
 mod store;
 mod vector;
@@ -113,6 +114,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Combine text/file criteria, negative examples and bounded evidence in one scan.
+    Retrieve(retrieve::Options),
     /// Execute JSON retrieval leaves and file-set union/intersection/difference.
     Query {
         #[arg(long)]
@@ -268,6 +271,45 @@ fn main() -> Result<()> {
             };
             hits.truncate(*top);
             show(hits, *json)?;
+        }
+        Cmd::Retrieve(options) => {
+            options.validate()?;
+            let (dim, enc) = config(&store)?;
+            let mut engine = None;
+            let response = retrieve::run(options, &store, dim, enc, &mut |text| {
+                check_backend(&store, &cli)?;
+                if engine.is_none() {
+                    engine = Some(new_embedder(&cli)?);
+                }
+                Ok(engine
+                    .as_mut()
+                    .unwrap()
+                    .embed(
+                        &[Input {
+                            kind: "text",
+                            value: text.into(),
+                        }],
+                        "query",
+                    )?
+                    .remove(0))
+            })?;
+            if options.json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                for evidence in response.hits {
+                    println!(
+                        "{:.4}\t{}:{}-{}\t{}",
+                        evidence.distance,
+                        evidence.hit.path,
+                        evidence.hit.start_line,
+                        evidence.hit.end_line,
+                        evidence.source_state
+                    );
+                    if let Some(context) = evidence.context {
+                        println!("{context}");
+                    }
+                }
+            }
         }
         Cmd::Query { spec, top, json } => {
             use std::io::Read;

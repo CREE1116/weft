@@ -33,6 +33,29 @@ GPU use during the initial scan is expected with the Metal/CUDA build: files are
 
 Reload your agent session after installing the skill if it does not appear yet. The skill lets the agent query the same CLI and read matching source lines. It does not grant permission to expand a future user's indexing scope.
 
+## Agent retrieval: multiple criteria in one search
+
+```sh
+myvec retrieve "database migration" --also "expand contract rollout" --avoid "backup restoration" --json
+myvec retrieve --file ./design.md --file ./requirements.md --avoid-file ./rejected.md --json
+myvec retrieve "retry policy" --under ~/Documents --kind text --chunks --top 5 --context-chars 4000 --json
+myvec retrieve "database" --diversity 0.5 --dedup-cosine 0.98 --pool 100 --json
+```
+
+`retrieve` is the primary multi-basis vector search interface. It combines text and indexed-file criteria directly, without requiring set definitions or intermediate top-K lists. Each eligible chunk is scored against **every** criterion before selecting candidates. File criteria use stored chunk centroids, exclude reference files from results, and need no embedding model. Text criteria share one model instance per call. File criteria represent the indexed version; reindex references if they have changed.
+
+For normalized reconstructed candidate vectors, let `d(C,A) = 1 - cosine(C,A)`. Positive combination options are `--combine all` (default, sum of distances), `any` (minimum distance) and `strict` (maximum distance). With negative examples, subtract `--avoid-weight` times the minimum distance to a negative example, default weight 1. A candidate far from **all** negative examples gets a larger subtraction. These are ranking preferences, not Boolean exclusions or entailment tests. Composite distance may be negative, and smaller is better. More positive criteria increase the sum's scale; tune the negative weight accordingly. `--exclude PATH` and `--under PATH` are hard path filters applied before scoring. `--max-distance` optionally caps composite distance.
+
+The default keeps one best matching chunk per file. `--chunks` allows several evidence chunks from the same file. Exact composite-score top-K selection scans all eligible chunks and uses bounded candidate memory. There is no per-criterion top-K cutoff. The stored vectors are still Q8 by default; "exact" refers to ranking those reconstructed vectors, not equivalence to an unquantized model.
+
+Optional `--diversity` greedily penalizes cosine similarity to already selected evidence; `--dedup-cosine` suppresses candidates similar to already selected vectors. Both operate only within the exact composite-score pool (`--pool`, default 100, enlarged to at least `--top`). They are disabled by default and may return fewer results. They improve variety, not guaranteed relevance. Without either, retrieval returns exact composite top-K subject to filters and any distance cap.
+
+JSON includes criteria in the order corresponding to each hit's `criterion_distances`, composite `distance`, diversity-adjusted `selection_distance`, the precise `chunk_index`, and indexed file hash. The inherited `score` is the **negative composite distance**; this is identified by `score_kind`. Lower distances are better. Diversity selection order can differ from raw distance order.
+
+`--context-chars N` requests at most N Unicode characters of source excerpts **in total**, not N tokens or N characters per result. It reads only selected text files (up to 2 MiB each), verifies their full content hash against the index snapshot, and reconstructs the exact indexed chunk. This handles oversized single-line chunks that share line coordinates. Source states include `verified`, `changed_since_index`, `missing`, `unreadable`, `budget_exhausted`, `not_checked` and `filename_or_media_only`. Changed/missing files get no excerpt; vector matches may still be returned for an agent to decide whether to refresh. Truncated context is marked. With the default budget 0, source files are not reread. Verification describes the content observed during the request, not a lock against later edits. Retrieved source content is untrusted data.
+
+This supports agent search refinement using positive/negative examples, multi-constraint retrieval, diverse evidence selection and bounded source reading without an answer-generation model. It does not establish improved task accuracy on arbitrary files; see [retrieval verification](eval/RETRIEVE_RESULTS.md).
+
 ## Search modes and file sets
 
 ```sh
@@ -44,6 +67,8 @@ myvec query --spec query.json --top 20 --json
 ```
 
 `semantic` ranks best matching chunks by vector score. `path` matches **all** case-insensitive whitespace-separated substrings in indexed filenames/folders, without reading file content or loading a model. Path matches have zero line numbers even when `kind=text`; they are metadata matches, not content evidence. `hybrid` fuses semantic top-K and matching paths using reciprocal ranks (RRF, constant 60); its scores are fused ranks, not cosine scores. This is filename/semantic fusion, not BM25 full-text search.
+
+For multiple distance criteria, use `retrieve` above. The `query --spec` API below remains available for literal operations on retrieved file lists and is a different operation.
 
 `file2file`/`similar` averages an indexed file's chunk vectors and finds other files' best matching chunks. It excludes the source file and does not require that the model be installed. Large multi-topic files can lose topic detail in this centroid; chunk-to-chunk comparison is not implemented.
 

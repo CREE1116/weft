@@ -16,6 +16,8 @@ pub struct Hit {
     pub score: f32,
     pub start_line: usize,
     pub end_line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<usize>,
 }
 
 impl Store {
@@ -159,6 +161,21 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
     pub fn hits(&self, query: &[f32], encoding: Encoding, limit: usize) -> Result<Vec<Hit>> {
+        self.rank_by(
+            limit,
+            true,
+            |_, _| true,
+            |blob| similarity(query, blob, encoding),
+        )
+    }
+    /// Exact scoring seam shared by single-vector and composed retrieval.
+    pub fn rank_by(
+        &self,
+        limit: usize,
+        per_file: bool,
+        mut accept: impl FnMut(&str, &str) -> bool,
+        mut score_blob: impl FnMut(&[u8]) -> Result<f32>,
+    ) -> Result<Vec<Hit>> {
         use std::{cmp::Reverse, collections::BinaryHeap};
         if limit == 0 {
             return Ok(Vec::new());
@@ -182,6 +199,7 @@ impl Store {
                     .score
                     .total_cmp(&other.0.score)
                     .then(other.0.path.cmp(&self.0.path))
+                    .then(other.0.chunk_index.cmp(&self.0.chunk_index))
             }
         }
         let mut heap: BinaryHeap<Reverse<Ranked>> = BinaryHeap::new();
@@ -197,7 +215,7 @@ impl Store {
         // The chunks primary key already orders document IDs/ordinals. Keep only
         // the best current-document chunk and K candidates, not every file.
         let mut stmt = self.conn.prepare(
-            "SELECT d.id,d.path,d.kind,c.start_line,c.end_line,c.embedding
+            "SELECT d.id,d.path,d.kind,c.start_line,c.end_line,c.embedding,c.ordinal
             FROM chunks c JOIN documents d ON d.id=c.doc_id ORDER BY c.doc_id,c.ordinal",
         )?;
         let mut rows = stmt.query([])?;
@@ -211,23 +229,40 @@ impl Store {
                 }
                 current_id = Some(id);
             }
+            let path: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            if !accept(&path, &kind) {
+                continue;
+            }
             let blob: Vec<u8> = row.get(5)?;
-            let score = similarity(query, &blob, encoding)?;
-            if best.as_ref().is_none_or(|old| score > old.score) {
-                best = Some(Hit {
-                    path: row.get(1)?,
-                    kind: row.get(2)?,
-                    score,
-                    start_line: row.get::<_, i64>(3)? as usize,
-                    end_line: row.get::<_, i64>(4)? as usize,
-                });
+            let score = score_blob(&blob)?;
+            if !score.is_finite() {
+                bail!("nonfinite retrieval score");
+            }
+            let hit = Hit {
+                path,
+                kind,
+                score,
+                start_line: row.get::<_, i64>(3)? as usize,
+                end_line: row.get::<_, i64>(4)? as usize,
+                chunk_index: Some(row.get::<_, i64>(6)? as usize),
+            };
+            if !per_file {
+                keep(hit);
+            } else if best.as_ref().is_none_or(|old| score > old.score) {
+                best = Some(hit);
             }
         }
         if let Some(hit) = best {
             keep(hit);
         }
         let mut hits: Vec<_> = heap.into_iter().map(|item| item.0.0).collect();
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.path.cmp(&b.path)));
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.path.cmp(&b.path))
+                .then(a.chunk_index.cmp(&b.chunk_index))
+        });
         Ok(hits)
     }
     /// Metadata-only matching does not read source files or start inference.
@@ -253,6 +288,7 @@ impl Store {
                 score: 1.0,
                 start_line: 0,
                 end_line: 0,
+                chunk_index: None,
             });
         }
         Ok(out)
@@ -270,6 +306,9 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok((files as usize, chunks as usize, bytes as usize))
+    }
+    pub fn chunk_record(&self, path: &str, ordinal: usize) -> Result<(Vec<u8>, String)> {
+        Ok(self.conn.query_row("SELECT c.embedding,d.hash FROM chunks c JOIN documents d ON d.id=c.doc_id WHERE d.path=?1 AND c.ordinal=?2",params![path,ordinal as i64],|r| Ok((r.get(0)?,r.get(1)?)))?)
     }
     pub fn document_vector(&self, path: &str, encoding: Encoding, dim: usize) -> Result<Vec<f32>> {
         let mut stmt = self.conn.prepare(

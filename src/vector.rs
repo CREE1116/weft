@@ -58,6 +58,33 @@ pub fn pack(v: &[f32], encoding: Encoding) -> Vec<u8> {
     }
 }
 
+/// Normalize reconstructed vectors so composed distances are actual cosine
+/// distances even when quantization changed their norm slightly.
+pub fn unpack_normalized(bytes: &[u8], encoding: Encoding, dim: usize) -> Result<Vec<f32>> {
+    let values = match encoding {
+        Encoding::F32 => {
+            if bytes.len() != dim * 4 {
+                bail!("invalid f32 blob length");
+            }
+            bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        }
+        Encoding::Q8 => {
+            if bytes.len() != dim + 4 {
+                bail!("invalid q8 blob length");
+            }
+            let scale = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+            bytes[4..]
+                .iter()
+                .map(|b| *b as i8 as f32 * scale)
+                .collect::<Vec<_>>()
+        }
+    };
+    normalized_prefix(&values, dim)
+}
+
 pub fn similarity(query: &[f32], bytes: &[u8], encoding: Encoding) -> Result<f32> {
     match encoding {
         Encoding::F32 => {

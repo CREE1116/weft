@@ -70,6 +70,29 @@ def main():
         assert semantic and hybrid
         assert len({h["path"] for h in hybrid}) == len(hybrid)
 
+        multi = json.loads(run("retrieve", "network retry", "--also", "request deadlines",
+                               "--avoid", "travel", "--under", docs, "--kind", "text",
+                               "--chunks", "--context-chars", "120", "--json"))
+        assert multi["evaluated_chunks"] == refreshed["chunks"]
+        assert len(multi["criteria"]) == 3
+        assert 0 < multi["context_chars_used"] <= 120
+        assert sum(len(h.get("context", "")) for h in multi["hits"]) == multi["context_chars_used"]
+        assert all(len(h["criterion_distances"]) == 3 for h in multi["hits"])
+        file_only = json.loads(run("--model-file", root / "missing.gguf", "retrieve",
+                                   "--file", retry, "--avoid-file", docs / "trip.txt",
+                                   "--context-chars", "200", "--json"))
+        assert len(file_only["hits"]) == 1
+        assert file_only["hits"][0]["path"] == str(timeout)
+        assert file_only["hits"][0]["source_state"] == "verified"
+        saved = timeout.read_text()
+        timeout.write_text(saved + " changed after indexing")
+        stale = json.loads(run("--model-file", root / "missing.gguf", "retrieve",
+                               "--file", retry, "--avoid-file", docs / "trip.txt",
+                               "--context-chars", "200", "--json"))
+        assert stale["hits"][0]["source_state"] == "changed_since_index"
+        assert "context" not in stale["hits"][0]
+        timeout.write_text(saved)
+
         # Recompute reused embeddings to prove cache reuse preserves vectors.
         with sqlite3.connect(db) as conn:
             cached = conn.execute("SELECT c.ordinal,c.embedding FROM chunks c JOIN documents d ON d.id=c.doc_id WHERE d.path=? ORDER BY ordinal", (str(retry),)).fetchall()
@@ -124,6 +147,9 @@ def main():
                           "cache_vectors_equal_fresh": True,
                           "pause_resume_limit_stop": True,
                           "background_default_budget": 25,
+                          "multi_basis_full_scan_and_context_budget": True,
+                          "file_only_retrieval_without_model": True,
+                          "stale_evidence_withheld": True,
                           "atomic_stop_preserved_index": True,
                           "ordered_scan_uses_no_temp_sort": True}, indent=2))
 
