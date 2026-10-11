@@ -1158,7 +1158,7 @@ mod cli_tests {
     use super::*;
     #[test]
     fn bootstrap_can_read_version_without_a_subcommand() {
-        let error = Cli::try_parse_from(["myvec", "--version"]).err().unwrap();
+        let error = Cli::try_parse_from(["weft", "--version"]).err().unwrap();
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
         assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
     }

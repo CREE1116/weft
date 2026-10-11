@@ -1,6 +1,6 @@
 [package]
-name = "myvec"
-version = "0.6.0"
+name = "weft"
+version = "0.7.0"
 edition = "2024"
 description = "Local file explorer for agents powered by EmbeddingGemma 2"
 

@@ -6,7 +6,9 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 fn python_program() -> String {
-    std::env::var("MYVEC_PYTHON").unwrap_or_else(|_| "python3".to_string())
+    std::env::var("WEFT_PYTHON")
+        .or_else(|_| std::env::var("MYVEC_PYTHON"))
+        .unwrap_or_else(|_| "python3".to_string())
 }
 
 #[derive(Clone)]

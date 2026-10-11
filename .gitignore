@@ -1,5 +1,6 @@
 /target/
 /.myvec/
+/.weft/
 /.venv/
 *.db-journal
 __pycache__/

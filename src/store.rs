@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn additive_hash_migration_preserves_legacy_vectors_and_writers() {
         let path = std::env::temp_dir().join(format!(
-            "myvec-migration-{}-{}.sqlite",
+            "weft-migration-{}-{}.sqlite",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

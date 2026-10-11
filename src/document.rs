@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(doc.locations[1].label, "Page 2");
         assert_eq!(doc.images.len(), 1);
         assert_eq!(doc.images[0].format, "png");
-        let dir = std::env::temp_dir().join(format!("myvec-images-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("weft-images-{}", std::process::id()));
         doc.export_images(&dir).unwrap();
         assert_eq!(doc.images[0].location, "Page 1, Page 2");
         doc.export_images(&dir).unwrap();

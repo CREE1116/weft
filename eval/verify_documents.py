@@ -38,10 +38,10 @@ def pdf():
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('--binary',default='target/release/myvec')
+    parser.add_argument('--binary',default='target/release/weft')
     args=parser.parse_args()
     binary=str(Path(args.binary).resolve())
-    with tempfile.TemporaryDirectory(prefix='myvec-documents-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='weft-documents-') as tmp:
         root=Path(tmp).resolve(); docs=root/'docs';docs.mkdir();db=root/'index.sqlite'
         def archive(name, parts):
             with zipfile.ZipFile(docs/name,'w',zipfile.ZIP_DEFLATED) as file:

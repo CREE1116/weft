@@ -708,7 +708,7 @@ mod tests {
     #[test]
     fn verified_budgeted_context_uses_exact_chunk_and_detects_stale_sources() {
         let path = std::env::temp_dir().join(format!(
-            "myvec-context-{}-{}.txt",
+            "weft-context-{}-{}.txt",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -756,7 +756,7 @@ mod tests {
     }
     #[test]
     fn file_only_criteria_do_not_start_inference() {
-        let path = std::env::temp_dir().join(format!("myvec-reference-{}.txt", std::process::id()));
+        let path = std::env::temp_dir().join(format!("weft-reference-{}.txt", std::process::id()));
         std::fs::write(&path, "reference").unwrap();
         let canonical = path.canonicalize().unwrap();
         let mut store = fixture(Encoding::F32);

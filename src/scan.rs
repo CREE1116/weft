@@ -105,6 +105,7 @@ pub fn excluded(path: &Path, computer: bool, extra: &[PathBuf]) -> bool {
             Some(name),
             Some(
                 ".git"
+                    | ".weft"
                     | ".myvec"
                     | "target"
                     | "node_modules"

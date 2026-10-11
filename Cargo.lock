@@ -1700,8 +1700,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
-name = "myvec"
-version = "0.6.0"
+name = "weft"
+version = "0.7.0"
 dependencies = [
  "ahash",
  "anyhow",

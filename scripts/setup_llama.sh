@@ -34,5 +34,5 @@ Ready.
 Start the local embedding server in a terminal:
   "$BUILD/bin/llama-server" -m "$MODEL" --embeddings --pooling mean --host 127.0.0.1 --port 8080 -ngl 99 -c 2048
 Then use:
-  target/release/myvec index ~/Documents --dim 768 --encoding q8
+  target/release/weft index ~/Documents --dim 768 --encoding q8
 MSG

@@ -27,12 +27,12 @@ def cosine(a, b):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default=str(Path.home()/".cargo/bin/myvec"))
+    parser.add_argument("--binary", default=str(Path.home()/".cargo/bin/weft"))
     parser.add_argument("--output", default="eval/HIERARCHY_RESULTS.json")
     args = parser.parse_args()
     binary = str(Path(args.binary).resolve())
     corpus = Path(__file__).resolve().parent/"corpus"
-    with tempfile.TemporaryDirectory(prefix="myvec-hierarchy-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="weft-hierarchy-") as tmp:
         root = Path(tmp).resolve()
         docs = root/"docs"
         docs.mkdir()

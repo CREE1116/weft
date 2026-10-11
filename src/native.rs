@@ -443,10 +443,13 @@ mod tests {
     #[test]
     #[ignore = "requires a local GGUF and running reference server"]
     fn native_reference_suite() -> Result<()> {
-        let path = std::env::var("MYVEC_TEST_MODEL")?;
+        let path =
+            std::env::var("WEFT_TEST_MODEL").or_else(|_| std::env::var("MYVEC_TEST_MODEL"))?;
         let model = NativeModel::load(
             Path::new(&path),
-            &std::env::var("MYVEC_DEVICE").unwrap_or_else(|_| "auto".into()),
+            &std::env::var("WEFT_DEVICE")
+                .or_else(|_| std::env::var("MYVEC_DEVICE"))
+                .unwrap_or_else(|_| "auto".into()),
         )?;
         let cases = [
             ("where is retry configured?".to_string(), "query"),
@@ -508,7 +511,8 @@ mod tests {
     #[test]
     #[ignore = "requires local GGUF; optional official tokenizer/reference embedding"]
     fn embedded_gguf_tokenizer_handles_search_text() -> Result<()> {
-        let path = std::env::var("MYVEC_TEST_MODEL")?;
+        let path =
+            std::env::var("WEFT_TEST_MODEL").or_else(|_| std::env::var("MYVEC_TEST_MODEL"))?;
         assert_eq!(check_q8_model(Path::new(&path))?, 413);
         let tokenizer = NativeTokenizer::from_gguf(Path::new(&path))?;
         for text in [
@@ -522,7 +526,9 @@ mod tests {
             assert_eq!(ids.first(), Some(&2));
             assert_eq!(ids.last(), Some(&1));
         }
-        if let Ok(reference_path) = std::env::var("MYVEC_TEST_TOKENIZER") {
+        if let Ok(reference_path) =
+            std::env::var("WEFT_TEST_TOKENIZER").or_else(|_| std::env::var("MYVEC_TEST_TOKENIZER"))
+        {
             let reference = HfTokenizer::from_file(reference_path)
                 .map_err(|e| anyhow::anyhow!("load reference tokenizer: {e}"))?;
             for text in [
@@ -537,13 +543,19 @@ mod tests {
                 assert_eq!(tokenizer.encode(text)?, expected.get_ids(), "{text}");
             }
         }
-        if let Ok(reference_path) = std::env::var("MYVEC_REFERENCE_EMBEDDING") {
+        if let Ok(reference_path) = std::env::var("WEFT_REFERENCE_EMBEDDING")
+            .or_else(|_| std::env::var("MYVEC_REFERENCE_EMBEDDING"))
+        {
             let model = NativeModel::load(
                 Path::new(&path),
-                &std::env::var("MYVEC_DEVICE").unwrap_or_else(|_| "auto".into()),
+                &std::env::var("WEFT_DEVICE")
+                    .or_else(|_| std::env::var("MYVEC_DEVICE"))
+                    .unwrap_or_else(|_| "auto".into()),
             )?;
             let output = model.embed("where is retry configured?", "query")?;
-            if let Ok(output_path) = std::env::var("MYVEC_NATIVE_OUTPUT") {
+            if let Ok(output_path) = std::env::var("WEFT_NATIVE_OUTPUT")
+                .or_else(|_| std::env::var("MYVEC_NATIVE_OUTPUT"))
+            {
                 std::fs::write(output_path, serde_json::to_vec(&output)?)?;
             }
             let reference: serde_json::Value =
