@@ -1,0 +1,18 @@
+[
+  {"query":"How long does a failed task wait before it retries again?", "relevant":["retry-policy.md"]},
+  {"query":"What is the procedure for safely changing a production database schema?", "relevant":["database-migration.md"]},
+  {"query":"How much money should I set aside for hotels, transport and food on the Kyoto vacation?", "relevant":["kyoto-budget.md"]},
+  {"query":"Where do we eat and what should we visit in Osaka?", "relevant":["osaka-plan.md"]},
+  {"query":"Who must sign off on a costly supplier bill?", "relevant":["invoice-approval.md"]},
+  {"query":"Ways to get better rest at night", "relevant":["sleep-notes.md"]},
+  {"query":"How do I feed the culture used to make fermented bread?", "relevant":["sourdough.md"]},
+  {"query":"What steps protect a service after replacing its access token?", "relevant":["key-rotation.md"]},
+  {"query":"What maximum wait is allowed for one web request?", "relevant":["timeout-policy.md"]},
+  {"query":"How do we restore the database if a schema deployment goes wrong?", "relevant":["schema-backup.md"]},
+  {"query":"How much will the Tokyo hotel, trains and restaurants cost?", "relevant":["tokyo-budget.md"]},
+  {"query":"Which neighborhood hotel has simple airport access in Osaka?", "relevant":["osaka-hotel.md"]},
+  {"query":"When do staff need to file purchase receipts to get paid back?", "relevant":["expense-receipts.md"]},
+  {"query":"What daily habit can help me feel more alert after waking?", "relevant":["morning-routine.md"]},
+  {"query":"How should I leave yeast dough to rise for pizza?", "relevant":["pizza-dough.md"]},
+  {"query":"How can I create different strong logins for every website?", "relevant":["passwords.md"]}
+]

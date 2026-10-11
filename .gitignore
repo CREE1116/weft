@@ -1,0 +1,16 @@
+/target/
+/.myvec/
+/.venv/
+*.db-journal
+__pycache__/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.index.lock
+*.gguf
+*.safetensors
+*.download
+.env
+.env.*
+.DS_Store

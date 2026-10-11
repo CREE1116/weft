@@ -1,0 +1,104 @@
+[
+  {
+    "agreement_with_f32_768_at_k": 1.0,
+    "dim": 768,
+    "encoding": "f32",
+    "misses": [
+      {
+        "expected": [
+          "database-migration.md"
+        ],
+        "query": "What is the procedure for safely changing a production database schema?",
+        "top_result": "eval/corpus/engineering/schema-backup.md"
+      }
+    ],
+    "recall_at_k": 0.9375,
+    "scan_ms_per_query": 0.018252625000000005,
+    "vector_bytes": 73728
+  },
+  {
+    "agreement_with_f32_768_at_k": 1.0,
+    "dim": 768,
+    "encoding": "q8",
+    "misses": [
+      {
+        "expected": [
+          "database-migration.md"
+        ],
+        "query": "What is the procedure for safely changing a production database schema?",
+        "top_result": "eval/corpus/engineering/schema-backup.md"
+      }
+    ],
+    "recall_at_k": 0.9375,
+    "scan_ms_per_query": 0.019020875,
+    "vector_bytes": 18528
+  },
+  {
+    "agreement_with_f32_768_at_k": 1.0,
+    "dim": 512,
+    "encoding": "f32",
+    "misses": [
+      {
+        "expected": [
+          "database-migration.md"
+        ],
+        "query": "What is the procedure for safely changing a production database schema?",
+        "top_result": "eval/corpus/engineering/schema-backup.md"
+      }
+    ],
+    "recall_at_k": 0.9375,
+    "scan_ms_per_query": 0.0130625625,
+    "vector_bytes": 49152
+  },
+  {
+    "agreement_with_f32_768_at_k": 1.0,
+    "dim": 512,
+    "encoding": "q8",
+    "misses": [
+      {
+        "expected": [
+          "database-migration.md"
+        ],
+        "query": "What is the procedure for safely changing a production database schema?",
+        "top_result": "eval/corpus/engineering/schema-backup.md"
+      }
+    ],
+    "recall_at_k": 0.9375,
+    "scan_ms_per_query": 0.0136563125,
+    "vector_bytes": 12384
+  },
+  {
+    "agreement_with_f32_768_at_k": 1.0,
+    "dim": 256,
+    "encoding": "f32",
+    "misses": [
+      {
+        "expected": [
+          "database-migration.md"
+        ],
+        "query": "What is the procedure for safely changing a production database schema?",
+        "top_result": "eval/corpus/engineering/schema-backup.md"
+      }
+    ],
+    "recall_at_k": 0.9375,
+    "scan_ms_per_query": 0.0079115625,
+    "vector_bytes": 24576
+  },
+  {
+    "agreement_with_f32_768_at_k": 1.0,
+    "dim": 256,
+    "encoding": "q8",
+    "misses": [
+      {
+        "expected": [
+          "database-migration.md"
+        ],
+        "query": "What is the procedure for safely changing a production database schema?",
+        "top_result": "eval/corpus/engineering/schema-backup.md"
+      }
+    ],
+    "recall_at_k": 0.9375,
+    "scan_ms_per_query": 0.008221250000000001,
+    "vector_bytes": 6240
+  }
+]

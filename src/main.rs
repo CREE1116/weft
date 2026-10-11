@@ -1,0 +1,855 @@
+mod chunk;
+mod embed;
+mod native;
+mod scan;
+mod store;
+mod vector;
+
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
+use embed::{Embedder, Input};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use store::{Hit, Store};
+use vector::{Encoding, normalized_prefix};
+
+#[derive(Parser)]
+#[command(about = "Compact local semantic file search with EmbeddingGemma 2")]
+struct Cli {
+    #[arg(long, global = true, default_value_os_t = default_db())]
+    db: PathBuf,
+    #[arg(long, global = true, default_value = "native")]
+    backend: String,
+    #[arg(
+        long,
+        global = true,
+        default_value = "http://127.0.0.1:8080/v1/embeddings"
+    )]
+    endpoint: String,
+    #[arg(long, global = true, default_value = "embeddinggemma-2")]
+    model: String,
+    #[arg(long, global = true, default_value_os_t = default_model_file())]
+    model_file: PathBuf,
+    /// Native runtime: auto, cpu, cuda[:N], metal[:N], mps[:N] (Metal alias).
+    #[arg(long, global = true, default_value = "auto")]
+    device: String,
+    #[arg(long, global = true, default_value = "scripts/embed_bridge.py")]
+    bridge: PathBuf,
+    /// Load image/audio encoders as well as text; uses substantially more memory.
+    #[arg(long, global = true)]
+    full_modal: bool,
+    #[command(subcommand)]
+    command: Cmd,
+}
+
+fn default_db() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local/share/myvec/index.sqlite")
+}
+
+fn default_model_file() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("myvec/embeddinggemma-2-Q8_0.gguf")
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Incrementally index a directory or a single file; respects gitignore.
+    Index {
+        path: Option<PathBuf>,
+        /// Index accessible computer files; unsupported formats get filename embeddings.
+        #[arg(long)]
+        all: bool,
+        /// Exclude a file or directory (repeatable).
+        #[arg(long)]
+        exclude: Vec<PathBuf>,
+        /// Discover files and report coverage without loading the model or changing the index.
+        #[arg(long)]
+        dry_run: bool,
+        /// Start an independent background scan and write progress to a log.
+        #[arg(long, conflicts_with = "dry_run")]
+        background: bool,
+        #[arg(long, default_value_t = 768)]
+        dim: usize,
+        #[arg(long, default_value = "q8")]
+        encoding: String,
+        #[arg(long)]
+        media: bool,
+        #[arg(long)]
+        prune: bool,
+        #[arg(long, default_value_t = 1100)]
+        chunk_chars: usize,
+        #[arg(long, default_value_t = 2)]
+        overlap_lines: usize,
+    },
+    /// Rank indexed files by a natural-language question.
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find files similar to an already indexed file, with no model startup.
+    Similar {
+        file: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    Stats {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare truncated/quantized vectors against FP32 768-dim, with labeled queries.
+    Bench {
+        #[arg(long)]
+        queries: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let mut store = Store::open(&cli.db)?;
+    match &cli.command {
+        Cmd::Index {
+            path,
+            all,
+            exclude,
+            dry_run,
+            background,
+            dim,
+            encoding,
+            media,
+            prune,
+            chunk_chars,
+            overlap_lines,
+        } => {
+            if !matches!(*dim, 256 | 512 | 768) {
+                bail!("--dim must be 256, 512, or 768; 128d has significant quality loss");
+            }
+            if *chunk_chars < 100 {
+                bail!("--chunk-chars must be at least 100");
+            }
+            if *media && cli.backend != "python" {
+                bail!(
+                    "native/HTTP models contain text weights only; media needs --backend python --full-modal"
+                );
+            }
+            if *media && !cli.full_modal {
+                bail!("--media requires --full-modal to load the image/audio encoders");
+            }
+            let enc = Encoding::parse(encoding)?;
+            let root = path
+                .clone()
+                .unwrap_or_else(|| {
+                    if *all {
+                        scan::computer_root()
+                    } else {
+                        PathBuf::from(".")
+                    }
+                })
+                .canonicalize()
+                .context("cannot open scan root")?;
+            let settings = [
+                ("dim", dim.to_string()),
+                ("encoding", enc.name().to_string()),
+                ("backend", cli.backend.clone()),
+                ("model", cli.model.clone()),
+                ("model_file", cli.model_file.to_string_lossy().into_owned()),
+                (
+                    "endpoint",
+                    if cli.backend == "http" {
+                        cli.endpoint.clone()
+                    } else {
+                        String::new()
+                    },
+                ),
+                ("chunk_chars", chunk_chars.to_string()),
+                ("overlap_lines", overlap_lines.to_string()),
+            ];
+            if !dry_run {
+                store.ensure_settings(&settings)?;
+            }
+            if *background {
+                if indexing_running(&cli.db)? {
+                    bail!("another indexer is already running for this database");
+                }
+                start_background(&cli.db)?;
+                return Ok(());
+            }
+            index(
+                &cli,
+                &mut store,
+                &root,
+                *dim,
+                enc,
+                *media,
+                *prune,
+                *chunk_chars,
+                *overlap_lines,
+                *all,
+                *all && path.is_none(),
+                exclude,
+                *dry_run,
+            )?;
+        }
+        Cmd::Search { query, top, json } => {
+            let (dim, enc) = config(&store)?;
+            check_backend(&store, &cli)?;
+            let mut engine = new_embedder(&cli)?;
+            let q = engine.embed(
+                &[Input {
+                    kind: "text",
+                    value: query.clone(),
+                }],
+                "query",
+            )?;
+            show(
+                store.hits(&normalized_prefix(&q[0], dim)?, enc, *top)?,
+                *json,
+            )?;
+        }
+        Cmd::Similar { file, top, json } => {
+            let (dim, enc) = config(&store)?;
+            let canonical = file
+                .canonicalize()
+                .with_context(|| format!("file does not exist: {}", file.display()))?;
+            let path = canonical.to_string_lossy().into_owned();
+            let q = store.document_vector(&path, enc, dim)?;
+            let hits = store
+                .hits(&q, enc, top.saturating_add(1))?
+                .into_iter()
+                .filter(|h| h.path != path)
+                .take(*top)
+                .collect();
+            show(hits, *json)?;
+        }
+        Cmd::Stats { json } => {
+            let (files, chunks, bytes) = store.stats()?;
+            let disk_bytes = database_disk_bytes(&cli.db)?;
+            let indexer_running = indexing_running(&cli.db)?;
+            let last_scan = store
+                .setting("last_scan")?
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "db": cli.db, "files": files, "chunks": chunks, "vector_bytes": bytes,
+                    "database_bytes": disk_bytes,
+                    "backend": store.setting("backend")?, "last_scan": last_scan,
+                    "indexer_running": indexer_running,
+                    }))?
+                );
+                return Ok(());
+            }
+            println!(
+                "files: {files}\nchunks: {chunks}\nembedding bytes: {bytes}\ndatabase bytes: {}",
+                disk_bytes
+            );
+            for name in [
+                "dim",
+                "encoding",
+                "model",
+                "model_file",
+                "backend",
+                "chunk_chars",
+            ] {
+                if let Some(v) = store.setting(name)? {
+                    println!("{name}: {v}");
+                }
+            }
+            if let Some(last_scan) = last_scan {
+                println!("last scan: {last_scan}");
+            }
+            println!("indexer running: {indexer_running}");
+        }
+        Cmd::Bench { queries, top, json } => bench(&cli, &store, queries, *top, *json)?,
+    }
+    Ok(())
+}
+
+fn config(store: &Store) -> Result<(usize, Encoding)> {
+    let dim = store
+        .setting("dim")?
+        .context("index empty; run index first")?
+        .parse()?;
+    let enc = Encoding::parse(
+        &store
+            .setting("encoding")?
+            .context("index missing encoding")?,
+    )?;
+    Ok((dim, enc))
+}
+fn check_backend(store: &Store, cli: &Cli) -> Result<()> {
+    for (name, current) in [("backend", &cli.backend), ("model", &cli.model)] {
+        if let Some(v) = store.setting(name)? {
+            if v != *current {
+                bail!("index {name}={v}, requested {current}; specify the same model and backend");
+            }
+        }
+    }
+    if let Some(v) = store
+        .setting("model_file")?
+        .filter(|_| cli.backend == "native")
+    {
+        if v != cli.model_file.to_string_lossy() {
+            bail!(
+                "index model file={v}, requested {}; specify the same model file",
+                cli.model_file.display()
+            );
+        }
+    }
+    if cli.backend == "http" && store.setting("endpoint")?.as_deref() != Some(&cli.endpoint) {
+        bail!("embedding endpoint differs from indexed endpoint");
+    }
+    Ok(())
+}
+fn new_embedder(cli: &Cli) -> Result<Embedder> {
+    Embedder::new(
+        &cli.backend,
+        &cli.endpoint,
+        &cli.model,
+        &cli.model_file,
+        &cli.device,
+        &cli.bridge,
+        !cli.full_modal,
+    )
+}
+fn show(hits: Vec<Hit>, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+    } else {
+        for h in hits {
+            println!(
+                "{:.4}\t{}:{}-{}\t{}",
+                h.score, h.path, h.start_line, h.end_line, h.kind
+            );
+        }
+    }
+    Ok(())
+}
+
+fn indexing_running(db: &Path) -> Result<bool> {
+    let path = db.with_extension("index.lock");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn database_disk_bytes(db: &Path) -> Result<u64> {
+    let mut bytes = std::fs::metadata(db)?.len();
+    for suffix in ["-wal", "-shm"] {
+        let path = PathBuf::from(format!("{}{suffix}", db.display()));
+        match std::fs::metadata(path) {
+            Ok(metadata) => bytes += metadata.len(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(bytes)
+}
+
+fn start_background(db: &Path) -> Result<()> {
+    use std::process::{Command, Stdio};
+    let log_path = db.with_extension("log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    let position = args
+        .iter()
+        .position(|arg| arg == "--background")
+        .context("missing background flag")?;
+    args.remove(position);
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Detach from the installer's/terminal's process group. Only async-signal-
+        // safe setsid is used between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x00000200 | 0x00000008); // NEW_PROCESS_GROUP | DETACHED_PROCESS
+    }
+    let child = command.spawn().context("start background indexer")?;
+    println!(
+        "{}",
+        serde_json::json!({"started":true,"pid":child.id(),"db":db,"log":log_path})
+    );
+    Ok(())
+}
+
+fn index(
+    cli: &Cli,
+    store: &mut Store,
+    root: &Path,
+    dim: usize,
+    enc: Encoding,
+    media: bool,
+    prune: bool,
+    chunk_chars: usize,
+    overlap: usize,
+    all_files: bool,
+    computer: bool,
+    exclusions: &[PathBuf],
+    dry_run: bool,
+) -> Result<()> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(cli.db.with_extension("index.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .context("another indexer is already running for this database")?;
+    let started = Instant::now();
+    let mut engine: Option<Embedder> = None;
+    let mut visited = HashSet::new();
+    let (mut added, mut skipped, mut errors) = (0usize, 0usize, 0usize);
+    let (mut discovered, mut filename_only) = (0usize, 0usize);
+    let mut excluded = exclusions
+        .iter()
+        .map(|p| {
+            p.canonicalize().or_else(|_| {
+                if p.is_absolute() {
+                    Ok(p.clone())
+                } else {
+                    std::env::current_dir().map(|cwd| cwd.join(p))
+                }
+            })
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let db = cli.db.canonicalize()?;
+    excluded.push(db.clone());
+    for suffix in ["-wal", "-shm", "-journal"] {
+        excluded.push(PathBuf::from(format!("{}{suffix}", db.display())));
+    }
+    excluded.push(db.with_extension("index.lock"));
+    let report = |status: &str,
+                  discovered: usize,
+                  added: usize,
+                  skipped: usize,
+                  filename_only: usize,
+                  errors: usize| {
+        serde_json::json!({"status":status,"root":root,"pid":std::process::id(),
+            "discovered":discovered,"indexed":added,"unchanged_or_skipped":skipped,
+            "filename_only_discovered":filename_only,"errors":errors,"elapsed_seconds":started.elapsed().as_secs_f64()})
+    };
+    if !dry_run {
+        store.set_setting("last_scan", &report("running", 0, 0, 0, 0, 0).to_string())?;
+    }
+    let mut walker = ignore::WalkBuilder::new(root);
+    walker
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .ignore(true)
+        .follow_links(false)
+        .filter_entry(move |entry| !scan::excluded(entry.path(), computer, &excluded));
+    for entry in walker.build() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("walk: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let mut kind = if chunk::supported(path) {
+            "text"
+        } else if media {
+            match chunk::media_kind(path) {
+                Some(s) => s,
+                None if all_files => "path",
+                None => continue,
+            }
+        } else if all_files {
+            "path"
+        } else {
+            continue;
+        };
+        let path_str = path.to_string_lossy().into_owned();
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                errors += 1;
+                continue;
+            }
+        };
+        let max_size = if kind == "text" {
+            2 * 1024 * 1024
+        } else {
+            64 * 1024 * 1024
+        };
+        if metadata.len() > max_size as u64 && kind != "path" && !all_files {
+            eprintln!("skip large file: {}", path.display());
+            skipped += 1;
+            continue;
+        }
+        if metadata.len() > max_size as u64 {
+            kind = "path";
+        }
+        discovered += 1;
+        if kind == "path" {
+            filename_only += 1;
+        }
+        if prune {
+            visited.insert(path_str.clone());
+        }
+        if dry_run {
+            continue;
+        }
+        if discovered % 25 == 0 {
+            store.set_setting(
+                "last_scan",
+                &report("running", discovered, added, skipped, filename_only, errors).to_string(),
+            )?;
+            eprintln!(
+                "scanned={discovered} indexed={added} unchanged/skipped={skipped} errors={errors}"
+            );
+        }
+        let mut data = if kind == "path" {
+            Vec::new()
+        } else {
+            match std::fs::File::open(path).and_then(|file| {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                file.take(max_size as u64 + 1).read_to_end(&mut bytes)?;
+                Ok(bytes)
+            }) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("{}: {e}", path.display());
+                    errors += 1;
+                    continue;
+                }
+            }
+        };
+        if data.len() > max_size {
+            if !all_files {
+                skipped += 1;
+                continue;
+            }
+            kind = "path";
+            filename_only += 1;
+            data.clear();
+        }
+        if kind == "text" && (data.contains(&0) || std::str::from_utf8(&data).is_err()) {
+            if !all_files {
+                skipped += 1;
+                continue;
+            }
+            kind = "path";
+            filename_only += 1;
+            data.clear();
+        }
+        let hash = if kind == "path" {
+            let signature = format!(
+                "filename-v1:{path_str}:{}:{:?}",
+                metadata.len(),
+                metadata.modified().ok()
+            );
+            blake3::hash(signature.as_bytes()).to_hex().to_string()
+        } else {
+            blake3::hash(&data).to_hex().to_string()
+        };
+        if store.unchanged(&path_str, &hash)? {
+            skipped += 1;
+            continue;
+        }
+        let segments: Vec<(usize, usize, Input)> = if kind == "text" {
+            let text = match std::str::from_utf8(&data) {
+                Ok(s) => s,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            chunk::split(text, chunk_chars, overlap)
+                .into_iter()
+                .map(|part| {
+                    (
+                        part.start,
+                        part.end,
+                        Input {
+                            kind: "text",
+                            value: part.text,
+                        },
+                    )
+                })
+                .collect()
+        } else if kind == "path" {
+            vec![(
+                0,
+                0,
+                Input {
+                    kind: "text",
+                    value: scan::filename_text(path),
+                },
+            )]
+        } else {
+            vec![(
+                0,
+                0,
+                Input {
+                    kind,
+                    value: path_str.clone(),
+                },
+            )]
+        };
+        if segments.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        if engine.is_none() {
+            engine = Some(new_embedder(cli)?);
+        }
+        if segments.len() > 32 {
+            let mut progress = report("running", discovered, added, skipped, filename_only, errors);
+            progress["active_file"] = serde_json::json!(path);
+            progress["chunks_total"] = serde_json::json!(segments.len());
+            progress["chunks_completed"] = serde_json::json!(0);
+            store.set_setting("last_scan", &progress.to_string())?;
+        }
+        let mut packed = Vec::with_capacity(segments.len());
+        let mut success = true;
+        for batch in segments.chunks(8) {
+            let input: Vec<Input> = batch.iter().map(|item| item.2.clone()).collect();
+            match engine.as_mut().unwrap().embed(&input, "document") {
+                Ok(vectors) => {
+                    for (item, v) in batch.iter().zip(vectors.iter()) {
+                        let norm = normalized_prefix(v, dim)?;
+                        packed.push((item.0, item.1, store::encode(&norm, enc)));
+                    }
+                    if segments.len() > 32 && packed.len() % 64 == 0 {
+                        let mut progress =
+                            report("running", discovered, added, skipped, filename_only, errors);
+                        progress["active_file"] = serde_json::json!(path);
+                        progress["chunks_total"] = serde_json::json!(segments.len());
+                        progress["chunks_completed"] = serde_json::json!(packed.len());
+                        store.set_setting("last_scan", &progress.to_string())?;
+                    }
+                }
+                Err(err) => {
+                    eprintln!("{}: {err:#}", path.display());
+                    errors += 1;
+                    success = false;
+                    break;
+                }
+            }
+        }
+        if !success {
+            continue;
+        }
+        store.replace(&path_str, &hash, kind, metadata.len() as usize, &packed)?;
+        added += 1;
+    }
+    if dry_run {
+        println!(
+            "{}",
+            report("preview", discovered, 0, 0, filename_only, errors)
+        );
+        return Ok(());
+    }
+    let deleted = if prune && errors == 0 {
+        store.prune(&visited, root)?
+    } else {
+        0
+    };
+    if prune && errors != 0 {
+        eprintln!("prune skipped due to scan/embedding errors");
+    }
+    let (files, chunks, bytes) = store.stats()?;
+    store.set_setting(
+        "last_scan",
+        &report(
+            if errors == 0 { "complete" } else { "partial" },
+            discovered,
+            added,
+            skipped,
+            filename_only,
+            errors,
+        )
+        .to_string(),
+    )?;
+    println!(
+        "indexed={added} unchanged/skipped={skipped} errors={errors} pruned={deleted} files={files} chunks={chunks} vector_bytes={bytes} elapsed={:.2}s",
+        started.elapsed().as_secs_f32()
+    );
+    if errors > 0 {
+        bail!("{errors} files failed to index");
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkQuery {
+    query: String,
+    relevant: Vec<String>,
+}
+
+fn bench(cli: &Cli, store: &Store, path: &Path, top: usize, json: bool) -> Result<()> {
+    let (dim, enc) = config(store)?;
+    check_backend(store, cli)?;
+    if dim != 768 || enc != Encoding::F32 {
+        bail!("bench requires a 768-dimensional f32 reference index");
+    }
+    let queries: Vec<BenchmarkQuery> = serde_json::from_slice(&std::fs::read(path)?)?;
+    if queries.is_empty() || top == 0 {
+        bail!("benchmark needs >=1 query and --top > 0");
+    }
+    if queries.iter().any(|q| q.relevant.is_empty()) {
+        bail!("each benchmark query needs relevant file names");
+    }
+    let doc_vectors = store.vectors()?;
+    if doc_vectors.is_empty() {
+        bail!("benchmark index is empty");
+    }
+    let mut engine = new_embedder(cli)?;
+    let inputs: Vec<Input> = queries
+        .iter()
+        .map(|q| Input {
+            kind: "text",
+            value: q.query.clone(),
+        })
+        .collect();
+    let mut query_vectors = Vec::new();
+    for batch in inputs.chunks(8) {
+        query_vectors.extend(engine.embed(batch, "query")?);
+    }
+    let variants = [
+        (768, Encoding::F32),
+        (768, Encoding::Q8),
+        (512, Encoding::F32),
+        (512, Encoding::Q8),
+        (256, Encoding::F32),
+        (256, Encoding::Q8),
+    ];
+    let mut reports = Vec::new();
+    let full_docs: Vec<_> = doc_vectors
+        .iter()
+        .map(|(p, v)| (p.clone(), store::encode(v, Encoding::F32)))
+        .collect();
+    let baseline: Vec<_> = query_vectors
+        .iter()
+        .map(|v| rank(&normalized_prefix(v, 768)?, &full_docs, Encoding::F32, top))
+        .collect::<Result<_>>()?;
+    for (n, format) in variants {
+        let docs = doc_vectors
+            .iter()
+            .map(|(p, v)| Ok((p.clone(), store::encode(&normalized_prefix(v, n)?, format))))
+            .collect::<Result<Vec<_>>>()?;
+        let stored_bytes: usize = docs.iter().map(|(_, b)| b.len()).sum();
+        let (mut recall, mut agreement, mut latency) = (0f32, 0f32, 0f64);
+        let mut misses = Vec::new();
+        for ((query, labeled), reference) in query_vectors.iter().zip(&queries).zip(&baseline) {
+            let qt = normalized_prefix(query, n)?;
+            let timer = Instant::now();
+            let predicted = rank(&qt, &docs, format, top)?;
+            latency += timer.elapsed().as_secs_f64();
+            let correct = predicted
+                .iter()
+                .filter(|p| labeled.relevant.iter().any(|r| p.ends_with(r)))
+                .count();
+            if correct == 0 {
+                misses.push(serde_json::json!({
+                    "query": labeled.query,
+                    "expected": labeled.relevant,
+                    "top_result": predicted.first(),
+                }));
+            }
+            recall += correct as f32 / labeled.relevant.len().min(top).max(1) as f32;
+            agreement += predicted.iter().filter(|p| reference.contains(p)).count() as f32
+                / reference.len().max(1) as f32;
+        }
+        reports.push(serde_json::json!({
+            "dim":n, "encoding":format.name(),"vector_bytes":stored_bytes,
+            "recall_at_k":recall/queries.len() as f32,
+            "agreement_with_f32_768_at_k":agreement/queries.len() as f32,
+            "scan_ms_per_query":latency*1000.0/queries.len() as f64,
+            "misses":misses
+        }));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+    } else {
+        println!(
+            "{:>4} {:>4} {:>10} {:>10} {:>12} {:>10}",
+            "dim", "type", "bytes", "recall@k", "agree@k", "scan_ms"
+        );
+        for r in &reports {
+            println!(
+                "{:>4} {:>4} {:>10} {:>10.3} {:>12.3} {:>10.3}",
+                r["dim"],
+                r["encoding"].as_str().unwrap_or("?"),
+                r["vector_bytes"],
+                r["recall_at_k"].as_f64().unwrap_or(0.),
+                r["agreement_with_f32_768_at_k"].as_f64().unwrap_or(0.),
+                r["scan_ms_per_query"].as_f64().unwrap_or(0.)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn rank(
+    query: &[f32],
+    docs: &[(String, Vec<u8>)],
+    enc: Encoding,
+    top: usize,
+) -> Result<Vec<String>> {
+    use std::collections::HashMap;
+    let mut best = HashMap::<String, f32>::new();
+    for (path, vec) in docs {
+        let score = vector::similarity(query, vec, enc)?;
+        best.entry(path.clone())
+            .and_modify(|x| {
+                if score > *x {
+                    *x = score
+                }
+            })
+            .or_insert(score);
+    }
+    let mut order: Vec<_> = best.into_iter().collect();
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(order.into_iter().take(top).map(|x| x.0).collect())
+}

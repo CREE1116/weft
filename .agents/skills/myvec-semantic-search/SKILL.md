@@ -1,0 +1,21 @@
+---
+name: myvec-semantic-search
+description: Search the local computer's myvec semantic file index, retrieve matching text chunks with line numbers, or find related files. Use for finding information across local files by meaning.
+---
+
+# Local semantic file search
+
+Use installed `myvec` from any directory. If PATH has not been refreshed, use `$HOME/.cargo/bin/myvec`. No server is required for native text embeddings. Default database: `$HOME/.local/share/myvec/index.sqlite`.
+
+1. Run `myvec stats --json` to check coverage and `indexer_running`. The installer starts the initial computer scan in the background; partial results are searchable immediately. A last scan marked `running` with `indexer_running=false` was interrupted. Read `$HOME/.local/share/myvec/index.log` when diagnosing indexing errors.
+2. Search with `myvec search "natural language question" --top 10 --json`. Matching text chunks have `kind=text`, `start_line`, `end_line`, and an absolute path. Open the relevant lines and cite the actual source when answering.
+3. A `kind=path` hit has filename/folder/type embeddings only, with line numbers zero. This does not establish what an image depicts, what audio contains, or what a PDF says. Inspect that file with an appropriate reader before making content claims.
+4. Find related files with `myvec similar ABSOLUTE_PATH --top 10 --json`; this uses indexed vectors without model startup.
+5. Refresh requested folders with `myvec index FOLDER`. To include filenames of unsupported formats in that folder, use `myvec index --all FOLDER`. Run `myvec index --all --background` for a whole-computer refresh when the user requests it, and check `stats --json` afterward. Use `--dry-run` to preview coverage and repeat `--exclude PATH` for custom omissions. Do not expand the user's requested scope merely because the skill is installed.
+6. Pruning is optional: use `index ... --prune` only for a complete root scan. Errors prevent pruning. Do not edit database backend/model settings to bypass mismatch errors.
+
+Native indexing chunks text (default 1,100 characters, two lines of overlap), preserves Unicode, and embeds only changed files. Keep 768 dimensions and Q8 vector storage by default; reducing dimensions needs a labeled comparison on the relevant corpus. Whole-computer scanning excludes system/runtime directories, caches, dependencies, private-key stores, `.env` files and the index itself, respects ignore files, and does not follow symlinks. Permission failures and oversized files mean coverage is not literally every byte on disk.
+
+Supported text up to 2 MiB is indexed by content; unsupported formats, binary/non-UTF8 input and oversized files use filename-only embeddings in `--all` mode. PDF/Office content extraction, native image/audio/video encoders and media time-segment search are not implemented. Optional Python media routing is separate and unvalidated locally; do not switch to it automatically or download the full model to answer an ordinary file search.
+
+Devices: `--device auto|cpu|metal:0|cuda:0`; `mps` aliases direct Metal. CUDA has not been validated on NVIDIA hardware here. Device changes do not require reindexing. Native inference's token limit is 2,048 including prefixes; use smaller chunks if exceeded rather than silently truncating. All inference and search stay local; the database stores vectors, paths and line ranges without copying source text.

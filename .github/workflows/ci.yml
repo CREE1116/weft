@@ -1,0 +1,21 @@
+name: Rust checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            features: ""
+          - os: macos-latest
+            features: "--features metal"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      - run: cargo test --locked ${{ matrix.features }}
