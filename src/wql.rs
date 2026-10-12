@@ -8,7 +8,9 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// Abstract Syntax Tree for WQL expressions.
 #[derive(Debug, Clone, PartialEq)]
@@ -707,7 +709,26 @@ pub struct WqlResponse {
     pub level: Level,
     pub top: usize,
     pub evaluated_candidates: usize,
+    pub timings_ms: WqlTimings,
     pub hits: Vec<WqlHit>,
+}
+
+/// Wall-clock phases of execute_wql, excluding CLI parsing/printing.
+/// `compile_ms` excludes model calls and file-vector lookups; `scan_ms`
+/// includes Top-K selection, and (for mmap) the Hit construction.
+#[derive(Debug, Default, Serialize)]
+pub struct WqlTimings {
+    pub embedding_ms: f64,
+    pub file_lookup_ms: f64,
+    pub compile_ms: f64,
+    pub scope_ms: f64,
+    pub cache_load_ms: f64,
+    pub scan_ms: f64,
+    pub result_ms: f64,
+    pub total_ms: f64,
+    pub text_terms: usize,
+    pub unique_text_terms: usize,
+    pub reused_text_terms: usize,
 }
 
 /// Run a parsed WQL query against the store.
@@ -721,17 +742,42 @@ pub fn execute_wql<E>(
 where
     E: FnMut(&str) -> Result<Vec<f32>>,
 {
+    let total_start = Instant::now();
+    let mut timings = WqlTimings::default();
+    let mut text_cache: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut cached_embed = |text: &str| -> Result<Vec<f32>> {
+        timings.text_terms += 1;
+        if let Some(vector) = text_cache.get(text) {
+            timings.reused_text_terms += 1;
+            return Ok(vector.clone());
+        }
+        let start = Instant::now();
+        let vector = embed_text(text)?;
+        timings.embedding_ms += start.elapsed().as_secs_f64() * 1000.0;
+        timings.unique_text_terms += 1;
+        text_cache.insert(text.to_owned(), vector.clone());
+        Ok(vector)
+    };
+    let mut file_lookup_ms = 0.0;
     let mut lookup_file = |path: &Path| -> Result<Vec<f32>> {
+        let start = Instant::now();
         let path_str = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        store.document_vector(&path_str.to_string_lossy(), enc, dim)
+        let vector = store.document_vector(&path_str.to_string_lossy(), enc, dim);
+        file_lookup_ms += start.elapsed().as_secs_f64() * 1000.0;
+        vector
     };
 
-    let compiled = compile_wql(&query.expr, dim, embed_text, &mut lookup_file)?;
+    let compile_start = Instant::now();
+    let compiled = compile_wql(&query.expr, dim, &mut cached_embed, &mut lookup_file)?;
+    let compile_ms = compile_start.elapsed().as_secs_f64() * 1000.0;
+    timings.compile_ms = (compile_ms - timings.embedding_ms - file_lookup_ms).max(0.0);
+    timings.file_lookup_ms = file_lookup_ms;
     if compiled.branches.is_empty() {
         bail!("compiled query has no branches");
     }
 
     // Resolve scope / view: error out if view is not registered and does not exist on disk
+    let scope_start = Instant::now();
     let target_under: Option<PathBuf> = if let Some(ref view_name) = query.view {
         if let Some(view_path) = store.get_view(view_name)? {
             Some(PathBuf::from(view_path))
@@ -750,6 +796,7 @@ where
     } else {
         None
     };
+    timings.scope_ms = scope_start.elapsed().as_secs_f64() * 1000.0;
 
     let level = query.level.unwrap_or(Level::File);
     let per_file = level == Level::File;
@@ -766,6 +813,7 @@ where
 
     let hits = if level == Level::Folder {
         // Hierarchy folder ranking
+        let scan_start = Instant::now();
         let (records, _chunks, _count) = crate::hierarchy::rank(
             store,
             enc,
@@ -779,7 +827,9 @@ where
                 Some(-compiled.eval(v))
             },
         )?;
-        records
+        timings.scan_ms = scan_start.elapsed().as_secs_f64() * 1000.0;
+        let result_start = Instant::now();
+        let hits = records
             .into_iter()
             .take(query.top)
             .map(|r| {
@@ -791,25 +841,43 @@ where
                     source_state: "aggregate_folder".into(),
                 }
             })
-            .collect()
+            .collect();
+        timings.result_ms = result_start.elapsed().as_secs_f64() * 1000.0;
+        hits
     } else if enc == Encoding::Q8 {
         // Try the mmap snapshot first (zero-copy, no B-tree traversal).
         // Fall back to in-process FlatVectorCache (SQLite read) if the file
         // does not exist or is stale (first run after schema change, etc.).
-        let hits = if let Ok(mmap) = store.load_mmap_cache(dim) {
+        let load_start = Instant::now();
+        let mmap_result = store.load_mmap_cache(dim);
+        timings.cache_load_ms += load_start.elapsed().as_secs_f64() * 1000.0;
+        let hits = if let Ok(mmap) = mmap_result {
             evaluated = mmap.count;
-            if target_under.is_some() {
+            let scan_start = Instant::now();
+            let hits = if target_under.is_some() {
                 mmap.scan_wql(&compiled, query.top, per_file, accept)
             } else {
                 mmap.scan_wql_unfiltered(&compiled, query.top, per_file)
-            }
-        } else if let Ok(flat) = store.load_flat_cache(dim) {
-            evaluated = flat.count;
-            flat.scan_wql(&compiled, query.top, per_file, accept)
+            };
+            timings.scan_ms = scan_start.elapsed().as_secs_f64() * 1000.0;
+            hits
         } else {
-            Vec::new()
+            let load_start = Instant::now();
+            let flat_result = store.load_flat_cache(dim);
+            timings.cache_load_ms += load_start.elapsed().as_secs_f64() * 1000.0;
+            if let Ok(flat) = flat_result {
+                evaluated = flat.count;
+                let scan_start = Instant::now();
+                let hits = flat.scan_wql(&compiled, query.top, per_file, accept);
+                timings.scan_ms = scan_start.elapsed().as_secs_f64() * 1000.0;
+                hits
+            } else {
+                Vec::new()
+            }
         };
-        hits.into_iter()
+        let result_start = Instant::now();
+        let hits = hits
+            .into_iter()
             .map(|h| {
                 let dist = -h.score;
                 WqlHit {
@@ -819,9 +887,12 @@ where
                     source_state: "indexed".into(),
                 }
             })
-            .collect()
+            .collect();
+        timings.result_ms = result_start.elapsed().as_secs_f64() * 1000.0;
+        hits
     } else {
         // Chunk or per-file ranking fallback
+        let scan_start = Instant::now();
         let raw_hits = store.rank_bounded(pool_limit, per_file, accept, |blob, _cutoff| {
             evaluated += 1;
             let vec = unpack_normalized(blob, enc, dim)?;
@@ -829,7 +900,9 @@ where
             // store.rank_bounded orders descending by score. Invert distance: score = -dist
             Ok(Some(-dist))
         })?;
+        timings.scan_ms = scan_start.elapsed().as_secs_f64() * 1000.0;
 
+        let result_start = Instant::now();
         let mut out = Vec::new();
         for h in raw_hits.into_iter().take(query.top) {
             let dist = -h.score;
@@ -847,15 +920,18 @@ where
                 source_state: "indexed".into(),
             });
         }
+        timings.result_ms = result_start.elapsed().as_secs_f64() * 1000.0;
         out
     };
 
+    timings.total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
     Ok(WqlResponse {
         query: format!("{:?}", query.expr),
         compiled_branches: compiled.branches.len(),
         level,
         top: query.top,
         evaluated_candidates: evaluated,
+        timings_ms: timings,
         hits,
     })
 }
@@ -1056,6 +1132,49 @@ mod tests {
         // Clean up
         store.delete_view("myview").unwrap();
         assert_eq!(store.get_view("myview").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_repeated_text_embeds_once_without_changing_compiled_scores() {
+        let dir = std::env::temp_dir().join(format!(
+            "weft-wql-cache-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("index.sqlite")).unwrap();
+        let q = parse_wql(r#"any(all("same","other"),avoid("same","other"))"#).unwrap();
+        let mut calls = Vec::new();
+        let mut embed = |text: &str| -> Result<Vec<f32>> {
+            calls.push(text.to_owned());
+            Ok(if text == "same" {
+                normalize(vec![0.8, 0.6])
+            } else {
+                normalize(vec![0.6, 0.8])
+            })
+        };
+        let result = execute_wql(&q, &store, 2, Encoding::Q8, &mut embed).unwrap();
+        assert_eq!(calls, vec!["same", "other"]);
+        assert_eq!(result.timings_ms.text_terms, 4);
+        assert_eq!(result.timings_ms.unique_text_terms, 2);
+        assert_eq!(result.timings_ms.reused_text_terms, 2);
+
+        let mut raw_embed = |text: &str| -> Result<Vec<f32>> {
+            Ok(if text == "same" {
+                normalize(vec![0.8, 0.6])
+            } else {
+                normalize(vec![0.6, 0.8])
+            })
+        };
+        let compiled = compile_wql(&q.expr, 2, &mut raw_embed, &mut |_| unreachable!()).unwrap();
+        for candidate in [normalize(vec![1.0, 1.0]), vec![1.0, 0.0]] {
+            let direct =
+                eval_ast_direct(&q.expr, &candidate, &mut raw_embed, &mut |_| unreachable!())
+                    .unwrap();
+            assert!((compiled.eval(&candidate) - direct).abs() < 1e-6);
+        }
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

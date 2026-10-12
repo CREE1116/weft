@@ -146,6 +146,17 @@ impl Store {
             .optional()?;
         Ok(found.as_deref() == Some(hash))
     }
+    /// Avoid downgrading already indexed media to filename-only during a
+    /// subsequent default `index --all` that did not request media inference.
+    pub fn has_media_embedding(&self, path: &str) -> Result<bool> {
+        let kind: Option<String> = self
+            .conn
+            .query_row("SELECT kind FROM documents WHERE path=?1", [path], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(matches!(kind.as_deref(), Some("image" | "audio" | "video")))
+    }
     pub fn replace(
         &mut self,
         path: &str,

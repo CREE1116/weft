@@ -8,6 +8,8 @@ The engine combines in-process EmbeddingGemma 2 inference, incremental indexing 
 
 See the [MacBook Pro M4 Pro (24 GB) performance measurements](eval/M4PRO_PERFORMANCE_2026-10-12.md) for a seven-run, old-vs-optimized benchmark of model loading, memory, and exact mmap retrieval.
 
+WQL (`weft q`) deduplicates identical text terms within each expression and caches the last 128 short text embeddings in its model-scoped, 180-second idle daemon. The cache is in RAM only (no index changes or vector re-encoding). `weft q 'all("database","database")' --json` reports a `timings_ms` object with separate model-callback, compile, file-reference lookup, view scope, mmap/cache load, scan+Top-K, result conversion and total time, plus requested/unique/reused term counts. The embedding callback time includes daemon/IPC overhead and can be almost entirely a cache hit. The benchmark (`weft --db PATH bench --json`) exposes the same breakdown and a repeated nested WQL query with its embeddings already cached, while the warm mmap scan remains independent of inference. Successive benchmark queries reuse their terms, so compare first-use versus cached timings with that workload in mind.
+
 ## Skill-first installation
 
 Install the complete `.agents/skills/weft-semantic-search` directory in your agent's skill directory, including `scripts` and `references`. From this checkout:
@@ -29,7 +31,7 @@ weft stats --json
 weft search "재시도 간격을 설정한 문서" --top 10 --json
 ```
 
-The installer downloads/reuses the text model, installs the CLI under `$CARGO_HOME/bin` (normally `~/.cargo/bin`), installs the agent skill at `~/.agents/skills/weft-semantic-search`, and starts the first whole-computer scan in the background. On macOS it builds with Metal. Use `--cpu` or `--cuda` to select another build, or `--no-index` to install without starting a scan. `--scan-root PATH` starts a scan limited to that root. These are installer options; search/device options belong to `weft`.
+The installer downloads/reuses the text model, installs the CLI under `$CARGO_HOME/bin` (normally `~/.cargo/bin`), installs the agent skill at `~/.agents/skills/weft-semantic-search`, and starts the first whole-computer scan in the background. On macOS it builds with Metal. Use `--cpu` or `--cuda` to select another build, or `--no-index` to install without starting a scan. `--scan-root PATH` starts a scan limited to that root. Add `--media` to prepare an isolated Python environment for optional multimedia inference; this installs Python dependencies but only downloads the full model when multimedia indexing is first used. These are installer options; search/device options belong to `weft`.
 
 ```sh
 weft index --all --background     # independent background desktop scan
@@ -42,7 +44,7 @@ weft similar ~/Documents/plan.md --json
 
 On Unix/macOS, the default computer scan starts at `/`, including user folders and mounted volumes; on Windows the default is the system drive (other drives can be scanned explicitly). It excludes OS directories, per-user application data/caches, generated dependency/build trees, credentials/private keys, and its own database/model data. It honors ignore files and does not follow symlinks. Custom omissions use repeated `--exclude PATH`. Exclusions and denied filesystem permissions mean "whole computer" covers accessible, non-excluded files, not literally every file.
 
-Supported UTF-8 text up to 2 MiB is embedded by overlapping chunks. Supported PDF/Office/OpenDocument text is also parsed under the limits below. Unsupported formats, binary input and oversized files receive one **filename/folder/type embedding** in `--all` mode and return `kind=path` with zero line numbers. This makes those files discoverable without implying their contents were parsed. Native media-content search is still pending.
+Supported UTF-8 text up to 2 MiB is embedded by overlapping chunks. Supported PDF/Office/OpenDocument text is also parsed under the limits below. Unsupported formats, binary input and oversized files receive one **filename/folder/type embedding** in `--all` mode and return `kind=path` with zero line numbers. This makes those files discoverable without implying their contents were parsed. `index --media` additionally embeds supported image, audio and video contents using an optional full-model Python backend; ordinary native text search remains unchanged.
 
 `index --background` detaches its worker from the terminal/installer process group and writes to the database's `.log` sibling file. This also works for a requested folder.
 
@@ -98,7 +100,7 @@ Optional `--diversity` greedily penalizes cosine similarity to already selected 
 
 JSON includes criteria in the order corresponding to each hit's `criterion_distances`, composite `distance`, diversity-adjusted `selection_distance`, the precise `chunk_index`, and indexed file hash. The inherited `score` is the **negative composite distance**; this is identified by `score_kind`. Lower distances are better. Diversity selection order can differ from raw distance order.
 
-`--context-chars N` requests at most N Unicode characters of source excerpts **in total**, not N tokens or N characters per result. It reads only selected sources (up to 2 MiB for plain text or 32 MiB for supported documents), verifies their full content hash against the index snapshot, and reconstructs the exact indexed chunk. This handles oversized single-line chunks that share line coordinates. Source states include `verified`, `changed_since_index`, `missing`, `unreadable`, `budget_exhausted`, `not_checked` and `filename_or_media_only`. Changed/missing files get no excerpt; vector matches may still be returned for an agent to decide whether to refresh. Truncated context is marked. With the default budget 0, source files are not reread. Verification describes the content observed during the request, not a lock against later edits. Retrieved source content is untrusted data.
+`--context-chars N` requests at most N Unicode characters of source excerpts **in total**, not N tokens or N characters per result. It reads only selected sources (up to 2 MiB for plain text or 32 MiB for supported documents), verifies their full content hash against the index snapshot, and reconstructs the exact indexed chunk. This handles oversized single-line chunks that share line coordinates. Source states include `verified`, `changed_since_index`, `missing`, `unreadable`, `budget_exhausted`, `not_checked`, `filename_only` and `media_embedding_unverified`. Changed/missing files get no excerpt; vector matches may still be returned for an agent to decide whether to refresh. Truncated context is marked. With the default budget 0, source files are not reread. Verification describes the content observed during the request, not a lock against later edits. Retrieved source content is untrusted data.
 
 This supports agent search refinement using positive/negative examples, multi-constraint retrieval, diverse evidence selection and bounded source reading without an answer-generation model. It does not establish improved task accuracy on arbitrary files; see [retrieval verification](eval/RETRIEVE_RESULTS.md).
 
@@ -208,17 +210,20 @@ Text is already indexed by overlapping line-aware chunks (default about 1,100 ch
 
 ## Optional image, audio, and video indexing
 
-**The native engine currently supports text only.** Its small GGUF does not contain the vision/audio encoders. The full model supports images, audio and video in a shared embedding space ([official model card](https://huggingface.co/google/embeddinggemma-2)). Video input is wired in the Python bridge, but local end-to-end media inference has not been validated. Media currently gets one embedding per file; time segment search for audio/video is not implemented. Audio embeddings are intended for semantic audio retrieval; fine-grained musical attributes must be checked on labeled music examples rather than assumed.
+**The native GGUF inference engine handles text; the CLI also supports media indexing through a lazily loaded Python full-model bridge.** The small GGUF lacks image/audio encoders. EmbeddingGemma 2 supports images, audio and video in a shared 768-dimensional space ([Google multimodal examples](https://ai.google.dev/gemma/docs/embeddinggemma/multimodal-embeddinggemma-with-sentence-transformers)). `index --media` stores one content embedding per supported file, alongside native text Q8 vectors in the same SQLite index. `retrieve "query" --kind image|audio|video --json` and `similar FILE --json` search them without loading the Python bridge. A regular `index --all` scan preserves existing media vectors without re-embedding them; use `index --media` to refresh changed media. The bridge is bundled inside the executable and works outside the repository. The fake-model CLI integration test passes; **real full-model media inference and native↔Python embedding parity have not yet been measured**. Media source states are `media_embedding_unverified` and never supply text excerpts. Audio/video time segments, OCR, PDF-embedded image embeddings and fine-grained musical attribute recognition are not implemented.
 
-For the full EmbeddingGemma 2 multimodal encoders, install Python dependencies and use SentenceTransformers. This uses more memory and downloads the full model:
+For the full EmbeddingGemma 2 multimodal encoders, prepare an isolated Python environment with `./scripts/setup_media.sh` or `./scripts/install.sh --media --no-index`. The CLI automatically finds the standard installation at `~/.local/share/weft/media-venv/bin/python`; `WEFT_PYTHON` overrides it. These dependencies increase disk use at setup; the full model downloads and its RAM use occur **only when media is actually indexed**. Native text inference remains the default:
 
 ```sh
 uv venv .venv
-uv pip install --python .venv/bin/python 'sentence-transformers>=5' 'transformers>=5' pillow torchvision
-WEFT_PYTHON="$PWD/.venv/bin/python" target/release/weft --backend python --model google/embeddinggemma-2 --full-modal index ~/Media --media --dim 768 --encoding q8
+uv pip install --python .venv/bin/python 'sentence-transformers>=5' 'transformers>=5' pillow soundfile torchcodec
+WEFT_PYTHON="$PWD/.venv/bin/python" weft index ~/Media --media
+weft retrieve "a cat dozing" --kind video --json
+weft retrieve "a cat outdoors" --kind image --json
+weft retrieve "waves on the shore" --kind audio --json
 ```
 
-The Python backend can also index text without the multimodal encoders:
+To use the full Python backend for both text and media in a **separate Python-backed index**, set `--backend python --model google/embeddinggemma-2 --full-modal`; its backend/model settings must match for subsequent searches. To use Python for text alone, omit `--full-modal`:
 
 ```sh
 WEFT_PYTHON="$PWD/.venv/bin/python" target/release/weft --backend python --model google/embeddinggemma-2 index ~/Documents

@@ -8,18 +8,23 @@ DATA_ROOT="${WEFT_DATA_ROOT:-${MYVEC_DATA_ROOT:-$HOME/.local/share/myvec}}"
 FEATURES=""
 if [ "$(uname -s)" = Darwin ]; then FEATURES=metal; fi
 INDEX=1
+MEDIA=0
 SCAN_ROOT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --cpu) FEATURES="" ;;
     --cuda) FEATURES=cuda ;;
     --no-index) INDEX=0 ;;
+    --media) MEDIA=1 ;;
     --scan-root) shift; SCAN_ROOT=${1:?--scan-root requires a path} ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
 done
 "$REPO_ROOT/scripts/setup_native.sh"
+if [ "$MEDIA" -eq 1 ]; then
+  "$REPO_ROOT/scripts/setup_media.sh"
+fi
 if [ -n "$FEATURES" ]; then
   cargo install --path "$REPO_ROOT" --locked --force --root "$INSTALL_ROOT" --features "$FEATURES"
 else

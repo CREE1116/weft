@@ -1,11 +1,49 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_SOCKET_PATH: &str = "/tmp/weft.sock";
+
+/// Small process-local, exact-text LRU. The daemon is already scoped by
+/// model, index and device; entries expire when that daemon exits.
+pub struct EmbeddingCache {
+    entries: VecDeque<(String, Vec<f32>)>,
+    capacity: usize,
+}
+
+impl EmbeddingCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn embed<F>(&mut self, text: &str, embed_fn: &mut F) -> Result<Vec<f32>>
+    where
+        F: FnMut(&str) -> Result<Vec<f32>>,
+    {
+        if let Some(idx) = self.entries.iter().position(|(key, _)| key == text) {
+            let entry = self.entries.remove(idx).expect("existing LRU entry");
+            let vector = entry.1.clone();
+            self.entries.push_back(entry);
+            return Ok(vector);
+        }
+        let vector = embed_fn(text)?;
+        // Bound both the entry count and the size of individual query keys.
+        if self.capacity > 0 && text.len() <= 4096 {
+            if self.entries.len() == self.capacity {
+                self.entries.pop_front();
+            }
+            self.entries.push_back((text.to_owned(), vector.clone()));
+        }
+        Ok(vector)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -180,6 +218,8 @@ impl DaemonServer {
         );
 
         let mut last_activity = Instant::now();
+        // 128 * 768 * f32 = 384 KiB of vector data, plus short text keys.
+        let mut embed_cache = EmbeddingCache::new(128);
 
         loop {
             match listener.accept() {
@@ -201,7 +241,7 @@ impl DaemonServer {
                                     let _ = stream.write_all(&out);
                                 }
                                 Request::Embed { text } => {
-                                    let resp = match embed_fn(&text) {
+                                    let resp = match embed_cache.embed(&text, &mut embed_fn) {
                                         Ok(vec) => Response::EmbedResult { vector: vec },
                                         Err(e) => Response::Error {
                                             message: e.to_string(),
@@ -252,5 +292,35 @@ impl DaemonServer {
     {
         let listener = self.bind()?;
         self.serve(listener, embed_fn, on_idle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn exact_lru_reuses_results_evicts_old_entries_and_never_caches_failures() {
+        let mut cache = EmbeddingCache::new(2);
+        let calls = Cell::new(0);
+        let mut embed = |text: &str| -> Result<Vec<f32>> {
+            calls.set(calls.get() + 1);
+            if text == "error" {
+                anyhow::bail!("failed embedding");
+            }
+            Ok(vec![text.len() as f32])
+        };
+
+        assert_eq!(cache.embed("alpha", &mut embed).unwrap(), vec![5.0]);
+        assert_eq!(cache.embed("beta", &mut embed).unwrap(), vec![4.0]);
+        assert_eq!(cache.embed("alpha", &mut embed).unwrap(), vec![5.0]);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cache.embed("gamma", &mut embed).unwrap(), vec![5.0]);
+        assert_eq!(cache.embed("beta", &mut embed).unwrap(), vec![4.0]);
+        assert_eq!(calls.get(), 4);
+        assert!(cache.embed("error", &mut embed).is_err());
+        assert!(cache.embed("error", &mut embed).is_err());
+        assert_eq!(calls.get(), 6);
     }
 }

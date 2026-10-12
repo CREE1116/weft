@@ -405,7 +405,12 @@ pub fn run(
             continue;
         }
         if e.hit.kind != "text" {
-            e.source_state = "filename_or_media_only".into();
+            e.source_state = if e.hit.kind == "path" {
+                "filename_only"
+            } else {
+                "media_embedding_unverified"
+            }
+            .into();
             continue;
         }
         if remaining == 0 {

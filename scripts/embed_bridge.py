@@ -31,11 +31,7 @@ def main():
                 else:
                     vectors = model.encode(texts, prompt_name="Document").tolist()
             else:
-                items = [
-                    {"image": [i["value"]]} if i["kind"] == "image"
-                    else {i["kind"]: i["value"]}
-                    for i in inputs
-                ]
+                items = [{i["kind"]: i["value"]} for i in inputs]
                 vectors = model.encode(items).tolist()
             print(json.dumps({"embeddings": vectors}), flush=True)
         except Exception as exc:

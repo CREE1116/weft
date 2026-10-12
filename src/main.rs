@@ -48,8 +48,12 @@ struct Cli {
     /// Native runtime: auto, cpu, cuda[:N], metal[:N], mps[:N] (Metal alias).
     #[arg(long, global = true, default_value = "auto")]
     device: String,
-    #[arg(long, global = true, default_value = "scripts/embed_bridge.py")]
-    bridge: PathBuf,
+    /// Optional custom Python embedding bridge; the default is bundled into the binary.
+    #[arg(long, global = true)]
+    bridge: Option<PathBuf>,
+    /// Python full-model identifier for native indexing of images, audio, and video.
+    #[arg(long, global = true, default_value = "google/embeddinggemma-2")]
+    media_model: String,
     /// Load image/audio encoders as well as text; uses substantially more memory.
     #[arg(long, global = true)]
     full_modal: bool,
@@ -98,6 +102,8 @@ enum Cmd {
         dim: usize,
         #[arg(long, default_value = "q8")]
         encoding: String,
+        /// Index visual/audio/video content with the optional full-model Python encoder.
+        /// Native text inference stays fast and unchanged; media loads lazily.
         #[arg(long)]
         media: bool,
         #[arg(long)]
@@ -285,13 +291,13 @@ fn main() -> Result<()> {
             if *chunk_chars < 100 {
                 bail!("--chunk-chars must be at least 100");
             }
-            if *media && cli.backend != "python" {
+            if *media && cli.backend == "http" {
                 bail!(
-                    "native/HTTP models contain text weights only; media needs --backend python --full-modal"
+                    "HTTP backend cannot embed media; use native --media or python --full-modal --media"
                 );
             }
-            if *media && !cli.full_modal {
-                bail!("--media requires --full-modal to load the image/audio encoders");
+            if *media && cli.backend == "python" && !cli.full_modal {
+                bail!("Python --media requires --full-modal to load the image/audio encoders");
             }
             let enc = Encoding::parse(encoding)?;
             let root = path
@@ -324,6 +330,9 @@ fn main() -> Result<()> {
             ];
             if !dry_run {
                 store.ensure_settings(&settings)?;
+                if *media && cli.backend == "native" {
+                    store.ensure_settings(&[("media_model", cli.media_model.clone())])?;
+                }
             }
             if *background {
                 if indexing_running(&cli.db)? {
@@ -800,8 +809,26 @@ fn new_embedder(cli: &Cli) -> Result<Embedder> {
         &cli.model,
         &cli.model_file,
         &cli.device,
-        &cli.bridge,
+        cli.bridge.as_deref(),
         !cli.full_modal,
+    )
+}
+
+/// The optional Python process starts only for changed media files. Native text
+/// and full-model media embeddings target the same EmbeddingGemma 2 space;
+/// cross-backend ranking quality still needs comparison against a real model.
+fn new_media_embedder(cli: &Cli) -> Result<Embedder> {
+    if cli.backend == "python" {
+        return new_embedder(cli);
+    }
+    Embedder::new(
+        "python",
+        &cli.endpoint,
+        &cli.media_model,
+        &cli.model_file,
+        &cli.device,
+        cli.bridge.as_deref(),
+        false,
     )
 }
 
@@ -984,6 +1011,7 @@ fn index(
     }
     let started = Instant::now();
     let mut engine: Option<Embedder> = None;
+    let mut media_engine: Option<Embedder> = None;
     let mut visited = HashSet::new();
     let (mut added, mut skipped, mut errors) = (0usize, 0usize, 0usize);
     let (mut discovered, mut filename_only) = (0usize, 0usize);
@@ -1029,7 +1057,7 @@ fn index(
         .follow_links(false)
         .filter_entry(move |entry| !scan::excluded(entry.path(), computer, &excluded));
     for entry in walker.build() {
-        if !dry_run && !resource::gate(store, &mut engine)? {
+        if !dry_run && !resource::gate_pair(store, &mut engine, &mut media_engine)? {
             return Ok(());
         }
         let entry = match entry {
@@ -1058,6 +1086,18 @@ fn index(
             continue;
         };
         let path_str = path.to_string_lossy().into_owned();
+        if kind == "path"
+            && !media
+            && chunk::media_kind(path).is_some()
+            && store.has_media_embedding(&path_str)?
+        {
+            // Default whole-computer rescans preserve optional media vectors.
+            if prune {
+                visited.insert(path_str);
+            }
+            skipped += 1;
+            continue;
+        }
         let metadata = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
@@ -1070,6 +1110,9 @@ fn index(
             document::INPUT_LIMIT
         } else if kind == "text" {
             2 * 1024 * 1024
+        } else if matches!(kind, "image" | "audio" | "video") {
+            // Media is hashed by streaming; decoding happens in the bridge.
+            2 * 1024 * 1024 * 1024
         } else {
             64 * 1024 * 1024
         };
@@ -1100,7 +1143,7 @@ fn index(
                 "scanned={discovered} indexed={added} unchanged/skipped={skipped} errors={errors}"
             );
         }
-        let mut data = if kind == "path" {
+        let mut data = if kind == "path" || matches!(kind, "image" | "audio" | "video") {
             Vec::new()
         } else {
             match std::fs::File::open(path).and_then(|file| {
@@ -1145,6 +1188,28 @@ fn index(
                 metadata.modified().ok()
             );
             blake3::hash(signature.as_bytes()).to_hex().to_string()
+        } else if matches!(kind, "image" | "audio" | "video") {
+            // Do not allocate/read a 2 GiB movie into RAM just to detect
+            // whether it changed. Reuse persisted vectors for exact matches.
+            let mut hasher = blake3::Hasher::new();
+            let mut buffer = [0u8; 64 * 1024];
+            let hash_result = (|| -> std::io::Result<()> {
+                let mut file = std::fs::File::open(path)?;
+                loop {
+                    let len = file.read(&mut buffer)?;
+                    if len == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..len]);
+                }
+                Ok(())
+            })();
+            if let Err(err) = hash_result {
+                eprintln!("{}: media hash failed: {err}", path.display());
+                errors += 1;
+                continue;
+            }
+            hasher.finalize().to_hex().to_string()
         } else {
             blake3::hash(&data).to_hex().to_string()
         };
@@ -1227,7 +1292,7 @@ fn index(
         let mut packed = Vec::with_capacity(segments.len());
         let mut success = true;
         for batch in segments.chunks(1) {
-            if !resource::gate(store, &mut engine)? {
+            if !resource::gate_pair(store, &mut engine, &mut media_engine)? {
                 return Ok(());
             }
             let item = &batch[0];
@@ -1241,12 +1306,21 @@ fn index(
                 reused_chunks += 1;
                 continue;
             }
-            if engine.is_none() {
-                engine = Some(new_embedder(cli)?);
+            let selected_engine = if item.2.kind == "text" || cli.backend == "python" {
+                &mut engine
+            } else {
+                &mut media_engine
+            };
+            if selected_engine.is_none() {
+                *selected_engine = Some(if item.2.kind == "text" {
+                    new_embedder(cli)?
+                } else {
+                    new_media_embedder(cli)?
+                });
             }
             let compute_started = Instant::now();
             let input: Vec<Input> = batch.iter().map(|item| item.2.clone()).collect();
-            match engine.as_mut().unwrap().embed(&input, "document") {
+            match selected_engine.as_mut().unwrap().embed(&input, "document") {
                 Ok(vectors) => {
                     for (item, v) in batch.iter().zip(vectors.iter()) {
                         let norm = normalized_prefix(v, dim)?;
@@ -1272,7 +1346,12 @@ fn index(
                     break;
                 }
             }
-            if !resource::throttle(store, &mut engine, compute_started.elapsed())? {
+            if !resource::throttle_pair(
+                store,
+                &mut engine,
+                &mut media_engine,
+                compute_started.elapsed(),
+            )? {
                 return Ok(());
             }
         }
@@ -1412,16 +1491,21 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
     let med_ms = med_start.elapsed().as_secs_f64() * 1000.0;
 
     // 5. WQL Engine Retrieval Benchmarks
+    // Match the bounded, exact-text cache of the long-lived WQL daemon.
+    // The first occurrence incurs inference; subsequent queries reuse it.
+    let mut embedding_cache = daemon::EmbeddingCache::new(128);
     let mut embed_fn = |text: &str| -> Result<Vec<f32>> {
-        Ok(engine
-            .embed(
-                &[Input {
-                    kind: "text",
-                    value: text.into(),
-                }],
-                "query",
-            )?
-            .remove(0))
+        embedding_cache.embed(text, &mut |text| {
+            Ok(engine
+                .embed(
+                    &[Input {
+                        kind: "text",
+                        value: text.into(),
+                    }],
+                    "query",
+                )?
+                .remove(0))
+        })
     };
 
     // Query A: Single text
@@ -1446,6 +1530,14 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
     let res_c = wql::execute_wql(&q_c, store, dim, enc, &mut embed_fn)?;
     let time_c_ms = start_c.elapsed().as_secs_f64() * 1000.0;
     let rate_c = (res_c.evaluated_candidates as f64) / (time_c_ms / 1000.0).max(1e-6);
+
+    // Same query, same score/ranking, all four embeddings already cached.
+    let repeat_start = Instant::now();
+    let res_repeat = wql::execute_wql(&q_c, store, dim, enc, &mut embed_fn)?;
+    let time_repeat_ms = repeat_start.elapsed().as_secs_f64() * 1000.0;
+    if serde_json::to_value(&res_c.hits)? != serde_json::to_value(&res_repeat.hits)? {
+        bail!("cached WQL query returned different search results");
+    }
 
     // Benchmark the same memory-mapped path as live retrieval. Avoid loading
     // a duplicate heap copy of every vector, which skewed latency and peak RSS.
@@ -1498,6 +1590,7 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
                 "single_text": {
                     "branches": res_a.compiled_branches,
                     "elapsed_ms": time_a_ms,
+                    "timings_ms": res_a.timings_ms,
                     "pure_simd_ms": warm_scan_a.map(|(p50, _, _, _)| p50),
                     "mmap_scan_p50_ms": warm_scan_a.map(|(p50, _, _, _)| p50),
                     "mmap_scan_p90_ms": warm_scan_a.map(|(_, p90, _, _)| p90),
@@ -1510,6 +1603,7 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
                 "all_2branch": {
                     "branches": res_b.compiled_branches,
                     "elapsed_ms": time_b_ms,
+                    "timings_ms": res_b.timings_ms,
                     "evaluated_candidates": res_b.evaluated_candidates,
                     "candidates_per_sec": rate_b,
                     "top_hits": res_b.hits.len(),
@@ -1517,9 +1611,17 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
                 "nested_any_avoid": {
                     "branches": res_c.compiled_branches,
                     "elapsed_ms": time_c_ms,
+                    "timings_ms": res_c.timings_ms,
                     "evaluated_candidates": res_c.evaluated_candidates,
                     "candidates_per_sec": rate_c,
                     "top_hits": res_c.hits.len(),
+                },
+                "nested_any_avoid_cached_repeat": {
+                    "branches": res_repeat.compiled_branches,
+                    "elapsed_ms": time_repeat_ms,
+                    "timings_ms": res_repeat.timings_ms,
+                    "evaluated_candidates": res_repeat.evaluated_candidates,
+                    "top_hits": res_repeat.hits.len(),
                 }
             }
         });
@@ -1570,19 +1672,45 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
             );
         }
         println!(
-            "     E2E DB+Scan Latency:   {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
+            "     E2E WQL (incl. embed): {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
             time_a_ms, res_a.evaluated_candidates, rate_a
         );
         println!("  2. all(\"재시도\",\"백오프\"):");
         println!(
-            "     E2E DB+Scan Latency:   {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
+            "     E2E WQL (incl. embed): {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
             time_b_ms, res_b.evaluated_candidates, rate_b
         );
         println!("  3. any(all(), avoid()):");
         println!(
-            "     E2E DB+Scan Latency:   {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
+            "     E2E WQL (incl. embed): {:>7.2} ms | Scanned: {:>6} | {:>9.0} cands/sec",
             time_c_ms, res_c.evaluated_candidates, rate_c
         );
+        println!(
+            "  4. any(all(), avoid()), repeated (cached embeddings): {:.2} ms | Scanned: {}",
+            time_repeat_ms, res_repeat.evaluated_candidates
+        );
+        println!("------------------------------------------------------------");
+        println!("▶ [WQL Phase Breakdown] (ms; compile excludes embedding/lookup)");
+        for (name, t) in [
+            ("single", &res_a.timings_ms),
+            ("all", &res_b.timings_ms),
+            ("nested", &res_c.timings_ms),
+            ("repeat", &res_repeat.timings_ms),
+        ] {
+            println!(
+                "  {:<7} embed {:>6.2} compile {:>5.2} scope {:>5.2} load {:>5.2} scan+TopK {:>6.2} result {:>5.2} | terms {}/{} (reused {})",
+                name,
+                t.embedding_ms,
+                t.compile_ms,
+                t.scope_ms,
+                t.cache_load_ms,
+                t.scan_ms,
+                t.result_ms,
+                t.unique_text_terms,
+                t.text_terms,
+                t.reused_text_terms
+            );
+        }
         println!("============================================================");
     }
     Ok(())

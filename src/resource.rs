@@ -13,6 +13,15 @@ pub fn status(store: &Store, state: &str) -> Result<()> {
 }
 
 pub fn gate(store: &Store, engine: &mut Option<Embedder>) -> Result<bool> {
+    gate_pair(store, engine, &mut None)
+}
+
+/// Release both native and optional full multimodal weights when paused.
+pub fn gate_pair(
+    store: &Store,
+    engine: &mut Option<Embedder>,
+    media_engine: &mut Option<Embedder>,
+) -> Result<bool> {
     let mut paused = false;
     loop {
         match store.setting("index_action")?.as_deref() {
@@ -25,6 +34,7 @@ pub fn gate(store: &Store, engine: &mut Option<Embedder>) -> Result<bool> {
                     // No GPU kernels run after the current inference completes.
                     // Releasing weights also avoids retaining RAM while paused.
                     *engine = None;
+                    *media_engine = None;
                     status(store, "paused")?;
                     paused = true;
                 }
@@ -45,6 +55,15 @@ pub fn rest(compute: Duration, duty: u8) -> Duration {
 }
 
 pub fn throttle(store: &Store, engine: &mut Option<Embedder>, compute: Duration) -> Result<bool> {
+    throttle_pair(store, engine, &mut None, compute)
+}
+
+pub fn throttle_pair(
+    store: &Store,
+    engine: &mut Option<Embedder>,
+    media_engine: &mut Option<Embedder>,
+    compute: Duration,
+) -> Result<bool> {
     let duty = store
         .setting("index_duty_cycle")?
         .and_then(|s| s.parse::<u8>().ok())
@@ -52,7 +71,7 @@ pub fn throttle(store: &Store, engine: &mut Option<Embedder>, compute: Duration)
         .unwrap_or(100);
     let deadline = Instant::now() + rest(compute, duty);
     loop {
-        if !gate(store, engine)? {
+        if !gate_pair(store, engine, media_engine)? {
             return Ok(false);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());

@@ -8,7 +8,15 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 fn python_program() -> String {
     std::env::var("WEFT_PYTHON")
         .or_else(|_| std::env::var("MYVEC_PYTHON"))
-        .unwrap_or_else(|_| "python3".to_string())
+        .unwrap_or_else(|_| {
+            if let Some(home) = std::env::var_os("HOME") {
+                let candidate = Path::new(&home).join(".local/share/weft/media-venv/bin/python");
+                if candidate.is_file() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+            "python3".to_string()
+        })
 }
 
 #[derive(Clone)]
@@ -37,7 +45,7 @@ impl Embedder {
         model: &str,
         model_file: &Path,
         device: &str,
-        bridge: &Path,
+        bridge: Option<&Path>,
         text_only: bool,
     ) -> Result<Self> {
         match backend {
@@ -47,21 +55,30 @@ impl Embedder {
                 model: model.to_string(),
             }),
             "python" => {
-                let mut child = Command::new(python_program())
-                    .arg("-u")
-                    .arg(bridge)
+                // The default bridge travels inside the executable, so an installed
+                // `weft` works from any working directory without the source tree.
+                let mut command = Command::new(python_program());
+                command.arg("-u");
+                if let Some(path) = bridge {
+                    command.arg(path);
+                } else {
+                    command
+                        .arg("-c")
+                        .arg(include_str!("../scripts/embed_bridge.py"));
+                }
+                let mut child = command
                     .arg("--model")
-                    .arg(model)
-                    .args(if text_only {
-                        vec!["--text-only"]
+                    .arg(if model == "embeddinggemma-2" {
+                        "google/embeddinggemma-2"
                     } else {
-                        vec![]
+                        model
                     })
+                    .args(if text_only { vec!["--text-only"] } else { vec![] })
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::inherit())
                     .spawn()
-                    .with_context(|| format!("starting Python bridge {}", bridge.display()))?;
+                    .context("starting Python embedding bridge (set WEFT_PYTHON to a Python with sentence-transformers installed)")?;
                 let stdin = child
                     .stdin
                     .take()
