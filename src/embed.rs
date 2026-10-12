@@ -155,17 +155,40 @@ impl Embedder {
                     bail!("embedding server response has neither data nor embeddings")
                 }
             }
-            Self::Python { stdin, stdout, .. } => {
+            Self::Python {
+                child,
+                stdin,
+                stdout,
+            } => {
                 let arr: Vec<Value> = inputs
                     .iter()
                     .map(|x| json!({"kind":x.kind,"value":x.value}))
                     .collect();
-                serde_json::to_writer(&mut *stdin, &json!({"inputs":arr,"role":role}))?;
-                writeln!(stdin)?;
-                stdin.flush()?;
+                let send_result = (|| -> Result<()> {
+                    serde_json::to_writer(&mut *stdin, &json!({"inputs":arr,"role":role}))?;
+                    writeln!(stdin)?;
+                    stdin.flush()?;
+                    Ok(())
+                })();
+                if let Err(error) = send_result {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        bail!(
+                            "Python embedding bridge exited with {status} before replying (request write failed: {error}); inspect the Python error printed above"
+                        );
+                    }
+                    return Err(error).context("writing request to Python embedding bridge");
+                }
                 let mut line = String::new();
                 if stdout.read_line(&mut line)? == 0 {
-                    bail!("Python embedding process exited; check its stderr");
+                    let status = child
+                        .try_wait()
+                        .ok()
+                        .flatten()
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "without an exit status".to_string());
+                    bail!(
+                        "Python embedding bridge exited {status} without replying; inspect the Python error printed above"
+                    );
                 }
                 let response: Value =
                     serde_json::from_str(&line).context("invalid Python bridge response")?;
