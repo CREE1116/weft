@@ -8,7 +8,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            features: ""
+            features: "--no-default-features"
           - os: macos-latest
             features: "--features metal"
     runs-on: ${{ matrix.os }}
