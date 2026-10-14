@@ -1,4 +1,5 @@
 /target/
+/dist/
 /.myvec/
 /.weft/
 /.venv/
@@ -12,6 +13,7 @@ __pycache__/
 *.gguf
 *.safetensors
 *.download
+.build/
 .env
 .env.*
 .DS_Store

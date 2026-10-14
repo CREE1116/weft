@@ -56,7 +56,7 @@ if [ "$REBUILD" -eq 1 ] || ! compatible; then
     "$SOURCE/scripts/install.sh" --no-index
   fi
   CLI="$INSTALL_ROOT/bin/weft"
-  compatible || { printf 'Installed weft is incompatible; version 0.7.0 or newer is required.\n' >&2; exit 1; }
+  compatible || { printf 'Installed weft is incompatible; version 1.0.0 or newer is required.\n' >&2; exit 1; }
 else
   "$SCRIPT_DIR/setup-model.sh"
 fi

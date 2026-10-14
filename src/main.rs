@@ -54,6 +54,9 @@ struct Cli {
     /// Python full-model identifier for native indexing of images, audio, and video.
     #[arg(long, global = true, default_value = "google/embeddinggemma-2")]
     media_model: String,
+    /// Reuse a running embedding daemon; never load a second model as fallback.
+    #[arg(long, global = true)]
+    embedding_socket: Option<PathBuf>,
     /// Load image/audio encoders as well as text; uses substantially more memory.
     #[arg(long, global = true)]
     full_modal: bool,
@@ -108,6 +111,15 @@ enum Cmd {
         media: bool,
         #[arg(long)]
         prune: bool,
+        /// Limit scans and watch events to selected file categories (comma-separated).
+        #[arg(long, value_delimiter = ',', value_parser = ["text", "pdf", "word", "slides", "sheets", "ebooks", "image", "audio", "video", "other"])]
+        file_types: Vec<String>,
+        /// Rehash every file even when its size and timestamps are unchanged.
+        #[arg(long)]
+        verify_hashes: bool,
+        /// Keep the index synchronized with filesystem changes until interrupted.
+        #[arg(long, conflicts_with_all = ["background", "dry_run"])]
+        watch: bool,
         #[arg(long, default_value_t = 1100)]
         chunk_chars: usize,
         #[arg(long, default_value_t = 2)]
@@ -120,6 +132,16 @@ enum Cmd {
         #[arg(long, default_value = "semantic", value_parser = ["semantic", "path", "hybrid"])]
         mode: String,
         #[arg(long, default_value_t = 10)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Locate file, folder or chunk paths without loading an embedding model.
+    Locate {
+        query: String,
+        #[arg(long, default_value = "file", value_parser = ["file", "folder", "chunk"])]
+        level: String,
+        #[arg(long, default_value_t = 30)]
         top: usize,
         #[arg(long)]
         json: bool,
@@ -201,6 +223,9 @@ enum Cmd {
         /// Socket path for IPC.
         #[arg(long, default_value = daemon::DEFAULT_SOCKET_PATH)]
         socket: PathBuf,
+        /// Exit when idle without running any indexing work.
+        #[arg(long)]
+        no_auto_index: bool,
     },
 }
 
@@ -282,6 +307,9 @@ fn main() -> Result<()> {
             encoding,
             media,
             prune,
+            verify_hashes,
+            file_types,
+            watch,
             chunk_chars,
             overlap_lines,
         } => {
@@ -341,6 +369,14 @@ fn main() -> Result<()> {
                 start_background(&cli.db, *duty_cycle)?;
                 return Ok(());
             }
+            // Hold a separate lease for the whole watch session, including idle
+            // periods. Index deletion and stats must see an idle watcher too.
+            let _watch_lease = if *watch {
+                Some(acquire_index_lease(&cli.db, "watch.lock")?)
+            } else {
+                None
+            };
+            let mut index_runtime = IndexRuntime::default();
             index(
                 &cli,
                 &mut store,
@@ -354,9 +390,31 @@ fn main() -> Result<()> {
                 *all,
                 *all && path.is_none(),
                 exclude,
+                file_types,
                 *dry_run,
                 duty_cycle.unwrap_or(100),
+                *verify_hashes,
+                true,
+                &mut index_runtime,
             )?;
+            if *watch {
+                watch_index(
+                    &cli,
+                    &mut store,
+                    &root,
+                    *dim,
+                    enc,
+                    *media,
+                    *chunk_chars,
+                    *overlap_lines,
+                    *all,
+                    *all && path.is_none(),
+                    exclude,
+                    file_types,
+                    duty_cycle.unwrap_or(100),
+                    &mut index_runtime,
+                )?;
+            }
         }
         Cmd::Search {
             query,
@@ -395,12 +453,30 @@ fn main() -> Result<()> {
             hits.truncate(*top);
             show(hits, *json)?;
         }
+        Cmd::Locate {
+            query,
+            level,
+            top,
+            json,
+        } => {
+            show(store.locate(query, level, *top)?, *json)?;
+        }
         Cmd::Retrieve(options) => {
             options.validate()?;
             let (dim, enc) = config(&store)?;
             let mut engine = None;
             let response = retrieve::run(options, &store, dim, enc, &mut |text| {
                 check_backend(&store, &cli)?;
+                if let Some(socket) = &cli.embedding_socket {
+                    return daemon::DaemonClient::try_embed_wait(
+                        socket,
+                        text,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .context(
+                        "embedding daemon unavailable; reopen the search panel to restart it",
+                    )?;
+                }
                 if engine.is_none() {
                     engine = Some(new_embedder(&cli)?);
                 }
@@ -592,16 +668,32 @@ fn main() -> Result<()> {
             let parsed = wql::parse_wql(query)?;
             let (dim, enc) = config(&store)?;
             check_backend(&store, &cli)?;
-            let socket = daemon_socket(&cli);
+            let socket = cli
+                .embedding_socket
+                .clone()
+                .unwrap_or_else(|| daemon_socket(&cli));
 
             // File-only WQL needs no model or daemon. Each DB/model/device
             // combination gets its own socket to avoid mixing embeddings.
-            if parsed.expr.has_text() && !daemon::DaemonClient::is_alive(&socket) {
+            if cli.embedding_socket.is_none()
+                && parsed.expr.has_text()
+                && !daemon::DaemonClient::is_alive(&socket)
+            {
                 spawn_daemon_silent(&cli, &socket);
             }
 
             let mut fallback_engine = None;
             let response = wql::execute_wql(&parsed, &store, dim, enc, &mut |text| {
+                if cli.embedding_socket.is_some() {
+                    return daemon::DaemonClient::try_embed_wait(
+                        &socket,
+                        text,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .context(
+                        "embedding daemon unavailable; reopen the search panel to restart it",
+                    )?;
+                }
                 // 1. Try smart daemon IPC.
                 //    try_embed_wait polls for up to 15s while daemon loads the model.
                 //    Once the socket is bound (< 5ms after spawn), it connects immediately
@@ -695,6 +787,7 @@ fn main() -> Result<()> {
         Cmd::Daemon {
             idle_timeout,
             socket,
+            no_auto_index,
         } => {
             let (dim, enc) = config(&store)?;
             check_backend(&store, &cli)?;
@@ -711,6 +804,7 @@ fn main() -> Result<()> {
 
             // ── Phase 3: serve (drains backlog + enters normal loop) ──
             let store_db = cli.db.clone();
+            let no_auto_index = *no_auto_index;
             server.serve(
                 listener,
                 |text| {
@@ -725,9 +819,13 @@ fn main() -> Result<()> {
                         .remove(0))
                 },
                 move || {
+                    if no_auto_index {
+                        return Ok(());
+                    }
                     let mut s = Store::open(&store_db)?;
                     let views = s.list_views()?;
                     let mut indexed_any = false;
+                    let mut index_runtime = IndexRuntime::default();
                     for (name, path_str, _) in views {
                         let path = PathBuf::from(path_str);
                         if path.exists() {
@@ -748,8 +846,12 @@ fn main() -> Result<()> {
                                 false,
                                 false,
                                 &[],
+                                &[],
                                 false,
                                 100,
+                                false,
+                                false,
+                                &mut index_runtime,
                             ) {
                                 indexed_any = true;
                             }
@@ -903,17 +1005,31 @@ fn show(hits: Vec<Hit>, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn acquire_index_lease(db: &Path, extension: &str) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(db.with_extension(extension))?;
+    fs2::FileExt::try_lock_exclusive(&file)
+        .context("another indexer is already running for this database")?;
+    Ok(file)
+}
+
 fn indexing_running(db: &Path) -> Result<bool> {
-    let path = db.with_extension("index.lock");
-    if !path.exists() {
-        return Ok(false);
+    for extension in ["index.lock", "watch.lock"] {
+        let path = db.with_extension(extension);
+        if !path.exists() {
+            continue;
+        }
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => (),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(true),
+            Err(err) => return Err(err.into()),
+        }
     }
-    let file = std::fs::OpenOptions::new().write(true).open(path)?;
-    match fs2::FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(false),
-        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
-        Err(err) => Err(err.into()),
-    }
+    Ok(false)
 }
 
 fn database_disk_bytes(db: &Path) -> Result<u64> {
@@ -982,6 +1098,12 @@ fn start_background(db: &Path, duty_cycle: Option<u8>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct IndexRuntime {
+    engine: Option<Embedder>,
+    media_engine: Option<Embedder>,
+}
+
 fn index(
     cli: &Cli,
     store: &mut Store,
@@ -995,23 +1117,21 @@ fn index(
     all_files: bool,
     computer: bool,
     exclusions: &[PathBuf],
+    file_types: &[String],
     dry_run: bool,
     duty_cycle: u8,
+    verify_hashes: bool,
+    flush_snapshot: bool,
+    runtime: &mut IndexRuntime,
 ) -> Result<()> {
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(cli.db.with_extension("index.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock)
-        .context("another indexer is already running for this database")?;
+    let _index_lease = acquire_index_lease(&cli.db, "index.lock")?;
     if !dry_run {
         store.set_setting("index_action", "resume")?;
         store.set_setting("index_duty_cycle", &duty_cycle.to_string())?;
     }
     let started = Instant::now();
-    let mut engine: Option<Embedder> = None;
-    let mut media_engine: Option<Embedder> = None;
+    let engine = &mut runtime.engine;
+    let media_engine = &mut runtime.media_engine;
     let mut visited = HashSet::new();
     let (mut added, mut skipped, mut errors) = (0usize, 0usize, 0usize);
     let (mut discovered, mut filename_only) = (0usize, 0usize);
@@ -1047,6 +1167,9 @@ fn index(
     };
     if !dry_run {
         store.set_setting("last_scan", &report("running", 0, 0, 0, 0, 0).to_string())?;
+        // Let desktop clients distinguish an initial scan from an idle watcher
+        // before the directory walker reaches its first progress checkpoint.
+        eprintln!("scan_started=true scanned=0 indexed=0 unchanged/skipped=0 errors=0");
     }
     let mut walker = ignore::WalkBuilder::new(root);
     walker
@@ -1056,8 +1179,26 @@ fn index(
         .ignore(true)
         .follow_links(false)
         .filter_entry(move |entry| !scan::excluded(entry.path(), computer, &excluded));
-    for entry in walker.build() {
-        if !dry_run && !resource::gate_pair(store, &mut engine, &mut media_engine)? {
+    // Index changed text first, then media. The native text model and the
+    // full Python multimodal model should not compete for unified RAM/Metal
+    // memory, nor be loaded again for every interleaved file type.
+    let mut entries = walker.build();
+    let mut deferred_media = std::collections::VecDeque::new();
+    let mut media_pass = false;
+    loop {
+        let next = if media_pass {
+            deferred_media.pop_front().map(Ok)
+        } else {
+            match entries.next() {
+                Some(entry) => Some(entry),
+                None => {
+                    media_pass = true;
+                    continue;
+                }
+            }
+        };
+        let Some(entry) = next else { break };
+        if !dry_run && !resource::gate_pair(store, &mut *engine, &mut *media_engine)? {
             return Ok(());
         }
         let entry = match entry {
@@ -1069,7 +1210,9 @@ fn index(
             }
         };
         let path = entry.path();
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+        if !entry.file_type().is_some_and(|kind| kind.is_file())
+            || !scan::selected_type(path, file_types)
+        {
             continue;
         }
         let mut kind = if chunk::supported(path) || document::format(path).is_some() {
@@ -1085,6 +1228,10 @@ fn index(
         } else {
             continue;
         };
+        if !media_pass && matches!(kind, "image" | "audio" | "video") {
+            deferred_media.push_back(entry);
+            continue;
+        }
         let path_str = path.to_string_lossy().into_owned();
         if kind == "path"
             && !media
@@ -1134,6 +1281,11 @@ fn index(
         if dry_run {
             continue;
         }
+        let stamp = scan::file_stamp(&metadata);
+        if !verify_hashes && store.unchanged_stat(&path_str, kind, &stamp)? {
+            skipped += 1;
+            continue;
+        }
         if discovered % 25 == 0 {
             store.set_setting(
                 "last_scan",
@@ -1161,18 +1313,6 @@ fn index(
             }
         };
         if data.len() > max_size {
-            if !all_files {
-                skipped += 1;
-                continue;
-            }
-            kind = "path";
-            filename_only += 1;
-            data.clear();
-        }
-        if kind == "text"
-            && document::format(path).is_none()
-            && (data.contains(&0) || std::str::from_utf8(&data).is_err())
-        {
             if !all_files {
                 skipped += 1;
                 continue;
@@ -1214,6 +1354,13 @@ fn index(
             blake3::hash(&data).to_hex().to_string()
         };
         if store.unchanged(&path_str, &hash)? {
+            // A metadata change (touch or move) can preserve the file contents.
+            if std::fs::metadata(path)
+                .ok()
+                .is_some_and(|m| scan::file_stamp(&m) == stamp)
+            {
+                store.set_stat(&path_str, &stamp)?;
+            }
             skipped += 1;
             continue;
         }
@@ -1291,74 +1438,122 @@ fn index(
         }
         let mut packed = Vec::with_capacity(segments.len());
         let mut success = true;
-        for batch in segments.chunks(1) {
-            if !resource::gate_pair(store, &mut engine, &mut media_engine)? {
+        for batch in segments.chunks(16) {
+            if !resource::gate_pair(store, &mut *engine, &mut *media_engine)? {
                 return Ok(());
             }
-            let item = &batch[0];
-            let input_hash = if item.2.kind == "text" {
-                Some(*blake3::hash(item.2.value.as_bytes()).as_bytes())
-            } else {
-                None
-            };
-            if let Some(bytes) = input_hash.as_ref().and_then(|hash| cache.get(&hash[..])) {
-                packed.push((item.0, item.1, bytes.clone(), input_hash));
-                reused_chunks += 1;
-                continue;
+            let mut resolved: Vec<Option<(usize, usize, Vec<u8>, Option<[u8; 32]>)>> =
+                std::iter::repeat_with(|| None).take(batch.len()).collect();
+            let mut missing = Vec::new();
+            for (idx, item) in batch.iter().enumerate() {
+                let input_hash = (item.2.kind == "text")
+                    .then(|| *blake3::hash(item.2.value.as_bytes()).as_bytes());
+                if let Some(hash) = input_hash {
+                    if let Some(bytes) = cache.get(&hash[..]).cloned() {
+                        resolved[idx] = Some((item.0, item.1, bytes, Some(hash)));
+                        reused_chunks += 1;
+                        continue;
+                    }
+                    if let Some(bytes) = store.cached_embedding(&hash)? {
+                        cache.insert(hash.to_vec(), bytes.clone());
+                        resolved[idx] = Some((item.0, item.1, bytes, Some(hash)));
+                        reused_chunks += 1;
+                        continue;
+                    }
+                }
+                missing.push((idx, item, input_hash));
             }
-            let selected_engine = if item.2.kind == "text" || cli.backend == "python" {
-                &mut engine
-            } else {
-                &mut media_engine
-            };
-            if selected_engine.is_none() {
-                *selected_engine = Some(if item.2.kind == "text" {
-                    new_embedder(cli)?
+            if !missing.is_empty() {
+                let text_only = missing[0].1.2.kind == "text";
+                if cli.backend != "python" {
+                    if text_only {
+                        *media_engine = None;
+                    } else {
+                        *engine = None;
+                    }
+                }
+                let selected_engine = if text_only || cli.backend == "python" {
+                    &mut *engine
                 } else {
-                    new_media_embedder(cli)?
-                });
-            }
-            let compute_started = Instant::now();
-            let input: Vec<Input> = batch.iter().map(|item| item.2.clone()).collect();
-            match selected_engine.as_mut().unwrap().embed(&input, "document") {
-                Ok(vectors) => {
-                    for (item, v) in batch.iter().zip(vectors.iter()) {
-                        let norm = normalized_prefix(v, dim)?;
-                        let bytes = store::encode(&norm, enc);
-                        if let Some(hash) = input_hash {
-                            cache.insert(hash.to_vec(), bytes.clone());
+                    &mut *media_engine
+                };
+                if selected_engine.is_none() {
+                    *selected_engine = Some(if text_only {
+                        new_embedder(cli)?
+                    } else {
+                        new_media_embedder(cli)?
+                    });
+                }
+                let input: Vec<Input> = missing.iter().map(|(_, item, _)| item.2.clone()).collect();
+                let compute_started = Instant::now();
+                let embed_result = selected_engine.as_mut().unwrap().embed(&input, "document");
+                match embed_result {
+                    Ok(vectors) if vectors.len() == missing.len() => {
+                        for ((idx, item, input_hash), vector) in missing.iter().zip(vectors.iter())
+                        {
+                            let norm = normalized_prefix(vector, dim)?;
+                            let bytes = store::encode(&norm, enc);
+                            if let Some(hash) = input_hash {
+                                cache.insert(hash.to_vec(), bytes.clone());
+                            }
+                            resolved[*idx] = Some((item.0, item.1, bytes, *input_hash));
                         }
-                        packed.push((item.0, item.1, bytes, input_hash));
+                        if !resource::throttle_pair(
+                            store,
+                            &mut *engine,
+                            &mut *media_engine,
+                            compute_started.elapsed(),
+                        )? {
+                            return Ok(());
+                        }
                     }
-                    if segments.len() > 32 && packed.len() % 64 == 0 {
-                        let mut progress =
-                            report("running", discovered, added, skipped, filename_only, errors);
-                        progress["active_file"] = serde_json::json!(path);
-                        progress["chunks_total"] = serde_json::json!(segments.len());
-                        progress["chunks_completed"] = serde_json::json!(packed.len());
-                        store.set_setting("last_scan", &progress.to_string())?;
+                    Ok(vectors) => {
+                        eprintln!(
+                            "{}: embedder returned {} vectors for {} inputs",
+                            path.display(),
+                            vectors.len(),
+                            missing.len()
+                        );
+                        errors += 1;
+                        success = false;
+                        break;
                     }
-                }
-                Err(err) => {
-                    eprintln!("{}: {err:#}", path.display());
-                    errors += 1;
-                    success = false;
-                    break;
+                    Err(err) => {
+                        // A dead Python worker cannot serve later media files.
+                        // Drop it here so the next file can start a fresh bridge.
+                        if err
+                            .to_string()
+                            .starts_with("Python embedding bridge failed")
+                        {
+                            *selected_engine = None;
+                        }
+                        eprintln!("{}: {err:#}", path.display());
+                        errors += 1;
+                        success = false;
+                        break;
+                    }
                 }
             }
-            if !resource::throttle_pair(
-                store,
-                &mut engine,
-                &mut media_engine,
-                compute_started.elapsed(),
-            )? {
-                return Ok(());
+            packed.extend(resolved.into_iter().flatten());
+            if segments.len() > 32 && packed.len() % 64 == 0 {
+                let mut progress =
+                    report("running", discovered, added, skipped, filename_only, errors);
+                progress["active_file"] = serde_json::json!(path);
+                progress["chunks_total"] = serde_json::json!(segments.len());
+                progress["chunks_completed"] = serde_json::json!(packed.len());
+                store.set_setting("last_scan", &progress.to_string())?;
             }
         }
         if !success {
             continue;
         }
         store.replace(&path_str, &hash, kind, metadata.len() as usize, &packed)?;
+        if std::fs::metadata(path)
+            .ok()
+            .is_some_and(|m| scan::file_stamp(&m) == stamp)
+        {
+            store.set_stat(&path_str, &stamp)?;
+        }
         added += 1;
     }
     if dry_run {
@@ -1391,12 +1586,20 @@ fn index(
         "indexed={added} reused_chunks={reused_chunks} unchanged/skipped={skipped} errors={errors} pruned={deleted} files={files} chunks={chunks} vector_bytes={bytes} elapsed={:.2}s",
         started.elapsed().as_secs_f32()
     );
+    // Keep desktop clients' progress log current even when stdout is buffered
+    // for a long-running watcher process.
+    eprintln!(
+        "scan_complete=true scanned={discovered} indexed={added} unchanged/skipped={skipped} errors={errors}"
+    );
     if errors > 0 {
         bail!("{errors} files failed to index");
     }
     // Flush the mmap vector snapshot (Q8 only). This is a background-safe
     // atomic rename, so concurrent readers of the old file are unaffected.
-    if enc == Encoding::Q8 {
+    if flush_snapshot
+        && (added > 0 || deleted > 0 || !store.vec_path.is_file())
+        && enc == Encoding::Q8
+    {
         match store.flush_vectors_bin(dim) {
             Ok(n) => eprintln!(
                 "vectors.bin: wrote {n} chunks → {}",
@@ -1410,10 +1613,228 @@ fn index(
     Ok(())
 }
 
+/// Watch only the requested scan root. Coalesce editor save bursts, update the
+/// affected files, and rebuild the shared vector snapshot once per batch.
+#[allow(clippy::too_many_arguments)]
+fn watch_index(
+    cli: &Cli,
+    store: &mut Store,
+    root: &Path,
+    dim: usize,
+    enc: Encoding,
+    media: bool,
+    chunk_chars: usize,
+    overlap: usize,
+    all_files: bool,
+    computer: bool,
+    exclusions: &[PathBuf],
+    file_types: &[String],
+    duty_cycle: u8,
+    runtime: &mut IndexRuntime,
+) -> Result<()> {
+    use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+    use std::collections::BTreeSet;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let (sender, receiver) = mpsc::channel();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
+        let _ = sender.send(event);
+    })?;
+    let watch_root = if root.is_file() {
+        root.parent().unwrap_or(root)
+    } else {
+        root
+    };
+    watcher.watch(
+        watch_root,
+        if root.is_file() {
+            RecursiveMode::NonRecursive
+        } else {
+            RecursiveMode::Recursive
+        },
+    )?;
+    eprintln!("watching {}; press Ctrl-C to stop", root.display());
+
+    let mut last_work = Instant::now();
+    loop {
+        let first = loop {
+            match receiver.recv_timeout(Duration::from_secs(5)) {
+                Ok(event) => break event.context("filesystem watcher stopped")?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if last_work.elapsed() >= Duration::from_secs(90) {
+                        // Keep the watcher's footprint small between edits; the
+                        // next changed file will lazily load the model again.
+                        runtime.engine = None;
+                        runtime.media_engine = None;
+                        last_work = Instant::now();
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow::anyhow!("filesystem watcher stopped"));
+                }
+            }
+        };
+        let mut paths: BTreeSet<PathBuf> = first.paths.into_iter().collect();
+        while let Ok(next) = receiver.recv_timeout(Duration::from_millis(350)) {
+            let event = next?;
+            paths.extend(event.paths);
+            if paths.len() >= 2048 {
+                break;
+            }
+        }
+        let mut changed = false;
+        if paths.len() >= 2048 {
+            index(
+                cli,
+                store,
+                root,
+                dim,
+                enc,
+                media,
+                true,
+                chunk_chars,
+                overlap,
+                all_files,
+                computer,
+                exclusions,
+                file_types,
+                false,
+                duty_cycle,
+                false,
+                false,
+                runtime,
+            )?;
+            changed = true;
+        } else {
+            let mut existing_paths = Vec::new();
+            for path in paths {
+                if !path.starts_with(root) && path != root {
+                    continue;
+                }
+                if scan::excluded(&path, computer, exclusions) {
+                    continue;
+                }
+                if path == cli.db
+                    || path
+                        .to_string_lossy()
+                        .starts_with(&cli.db.to_string_lossy().to_string())
+                    || path == cli.db.with_extension("index.lock")
+                    || path == cli.db.with_extension("log")
+                {
+                    continue;
+                }
+                if path.exists() {
+                    if !path.is_file() && !path.is_dir() {
+                        continue;
+                    }
+                    existing_paths.push(path);
+                } else {
+                    changed |= store.remove_missing(&path)? > 0;
+                }
+            }
+            let targets = watch_scan_targets(existing_paths, watch_root);
+            for target in targets {
+                let result = index(
+                    cli,
+                    store,
+                    &target,
+                    dim,
+                    enc,
+                    media,
+                    false,
+                    chunk_chars,
+                    overlap,
+                    all_files,
+                    computer,
+                    exclusions,
+                    file_types,
+                    false,
+                    duty_cycle,
+                    false,
+                    false,
+                    runtime,
+                );
+                if store
+                    .setting("last_scan")?
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                    .and_then(|value| value.get("indexed").and_then(serde_json::Value::as_u64))
+                    .unwrap_or(0)
+                    > 0
+                {
+                    changed = true;
+                }
+                if let Err(error) = result {
+                    eprintln!("watch indexing {}: {error:#}", target.display());
+                }
+            }
+        }
+        if changed && enc == Encoding::Q8 {
+            store.flush_vectors_bin(dim)?;
+        }
+        last_work = Instant::now();
+    }
+}
+
+/// Turn a coalesced filesystem event batch into bounded scans. Files in one
+/// directory are scanned together; the shared runtime keeps inference warm
+/// across distinct directories without walking unrelated parts of the root.
+fn watch_scan_targets(
+    paths: impl IntoIterator<Item = PathBuf>,
+    watch_root: &Path,
+) -> std::collections::BTreeSet<PathBuf> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut targets = BTreeSet::new();
+    let mut files_by_parent = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    for path in paths {
+        if path.is_dir() {
+            targets.insert(path);
+        } else if path.is_file() {
+            files_by_parent
+                .entry(path.parent().unwrap_or(watch_root).to_path_buf())
+                .or_default()
+                .push(path);
+        }
+    }
+    for (parent, files) in files_by_parent {
+        if files.len() > 1 {
+            targets.insert(parent);
+        } else if let Some(file) = files.into_iter().next() {
+            targets.insert(file);
+        }
+    }
+    let directory_targets: Vec<_> = targets
+        .iter()
+        .filter(|path| path.is_dir())
+        .cloned()
+        .collect();
+    targets.retain(|path| {
+        !directory_targets
+            .iter()
+            .any(|directory| directory != path && path.starts_with(directory))
+    });
+    for directory in directory_targets {
+        targets.retain(|path| !path.starts_with(&directory) || path == &directory);
+    }
+    targets
+}
+
 #[derive(serde::Deserialize)]
 struct BenchmarkQuery {
     query: String,
     relevant: Vec<String>,
+}
+
+fn benchmark_build_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": env!("WEFT_GIT_COMMIT"),
+        "dirty": env!("WEFT_GIT_DIRTY") == "true",
+        "profile": env!("WEFT_BUILD_PROFILE"),
+        "target": env!("WEFT_BUILD_TARGET"),
+        "built_at_unix": env!("WEFT_BUILD_UNIX").parse::<u64>().unwrap_or(0),
+    })
 }
 
 fn bench(cli: &Cli, store: &Store, path: Option<&Path>, top: usize, json: bool) -> Result<()> {
@@ -1570,6 +1991,7 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
 
     if json {
         let out = serde_json::json!({
+            "build": benchmark_build_info(),
             "device": cli.device,
             "backend": cli.backend,
             "dim": dim,
@@ -1630,6 +2052,13 @@ fn bench_comprehensive(cli: &Cli, store: &Store, top: usize, json: bool) -> Resu
         println!("============================================================");
         println!("              WEFT ENGINE PERFORMANCE BENCHMARK             ");
         println!("============================================================");
+        println!(
+            "Build: {} ({}, {}, dirty={})",
+            env!("CARGO_PKG_VERSION"),
+            env!("WEFT_GIT_COMMIT"),
+            env!("WEFT_BUILD_PROFILE"),
+            env!("WEFT_GIT_DIRTY")
+        );
         println!(
             "Device: {:<12} Backend: {:<8} Encoding: {} ({}d)",
             cli.device,
@@ -1797,6 +2226,7 @@ fn bench_reference_queries(
                 / reference.len().max(1) as f32;
         }
         reports.push(serde_json::json!({
+            "build": benchmark_build_info(),
             "dim":n, "encoding":format.name(),"vector_bytes":stored_bytes,
             "recall_at_k":recall/queries.len() as f32,
             "agreement_with_f32_768_at_k":agreement/queries.len() as f32,
@@ -1807,6 +2237,13 @@ fn bench_reference_queries(
     if json {
         println!("{}", serde_json::to_string_pretty(&reports)?);
     } else {
+        println!(
+            "Build: {} ({}, {}, dirty={})",
+            env!("CARGO_PKG_VERSION"),
+            env!("WEFT_GIT_COMMIT"),
+            env!("WEFT_BUILD_PROFILE"),
+            env!("WEFT_GIT_DIRTY")
+        );
         println!(
             "{:>4} {:>4} {:>10} {:>10} {:>12} {:>10}",
             "dim", "type", "bytes", "recall@k", "agree@k", "scan_ms"
@@ -1852,6 +2289,52 @@ fn rank(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[test]
+    fn watcher_batches_files_by_parent_and_keeps_cross_folder_scans_bounded() {
+        let root = std::env::temp_dir().join(format!("weft-watch-batch-{}", std::process::id()));
+        let a_dir = root.join("a");
+        let b_dir = root.join("b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        let a1 = a_dir.join("one.txt");
+        let a2 = a_dir.join("two.txt");
+        let b1 = b_dir.join("three.txt");
+        for path in [&a1, &a2, &b1] {
+            std::fs::write(path, "changed").unwrap();
+        }
+
+        assert_eq!(
+            watch_scan_targets([a1.clone(), a2], &root),
+            std::collections::BTreeSet::from([a_dir])
+        );
+        assert_eq!(
+            watch_scan_targets([a1.clone(), b1], &root),
+            std::collections::BTreeSet::from([a1.clone(), root.join("b/three.txt")])
+        );
+        assert_eq!(
+            watch_scan_targets([a1.clone()], &root),
+            std::collections::BTreeSet::from([a1])
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn running_status_includes_idle_watch_leases_and_releases_after_exit() {
+        let directory =
+            std::env::temp_dir().join(format!("weft-watch-lease-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let db = directory.join("index.sqlite");
+        assert!(!indexing_running(&db).unwrap());
+        let watcher = acquire_index_lease(&db, "watch.lock").unwrap();
+        assert!(indexing_running(&db).unwrap());
+        assert!(acquire_index_lease(&db, "watch.lock").is_err());
+        let indexer = acquire_index_lease(&db, "index.lock").unwrap();
+        drop(watcher);
+        assert!(indexing_running(&db).unwrap());
+        drop(indexer);
+        assert!(!indexing_running(&db).unwrap());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn bootstrap_can_read_version_without_a_subcommand() {
         let error = Cli::try_parse_from(["weft", "--version"]).err().unwrap();

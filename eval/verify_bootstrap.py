@@ -31,7 +31,7 @@ def main():
         cli = root / "fake-weft"
         cli.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
 with open(os.environ['TEST_LOG'], 'a') as f: f.write(json.dumps(['cli', *sys.argv[1:]])+'\\n')
-if sys.argv[1:] == ['--version']: print('weft 0.7.0')
+if sys.argv[1:] == ['--version']: print('weft 1.0.0')
 else: print(json.dumps({'started':True,'pid':123}))
 ''')
         cli.chmod(0o755)
@@ -90,7 +90,7 @@ with open(os.environ['TEST_LOG'],'a') as f: f.write(json.dumps([Path(sys.argv[0]
         assert not (root / "data/index.sqlite").exists()
         alias = root / "runtime/bin/myvec"
         assert alias.stat().st_size < 256
-        assert subprocess.check_output([str(alias), "--version"], env=env, text=True).strip() == "weft 0.7.0"
+        assert subprocess.check_output([str(alias), "--version"], env=env, text=True).strip() == "weft 1.0.0"
         # Legacy configuration still selects the same install, model and DB.
         before_legacy = len(calls())
         legacy = {"WEFT_INSTALL_ROOT":"", "WEFT_SKILL_ROOT":"", "WEFT_DATA_ROOT":"",
@@ -130,7 +130,7 @@ with open(os.environ['TEST_LOG'],'a') as f: f.write(json.dumps([Path(sys.argv[0]
         assert not list(root.glob("weft-source.*"))
         if args.binary:
             actual = Path(args.binary).resolve()
-            assert subprocess.check_output([str(actual), "--version"], text=True).strip() == "weft 0.7.0"
+            assert subprocess.check_output([str(actual), "--version"], text=True).strip() == "weft 1.0.0"
             shutil.copy2(actual, root / "runtime/bin/weft")
             before = len(calls())
             ready = run()

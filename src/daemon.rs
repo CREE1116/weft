@@ -262,13 +262,15 @@ impl DaemonServer {
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if last_activity.elapsed() >= self.idle_timeout {
                         eprintln!(
-                            "weft daemon: idle for {:?}. Running post-session indexing before exit...",
+                            "weft daemon: idle for {:?}. Running idle action before exit...",
                             self.idle_timeout
                         );
                         if let Err(e) = on_idle() {
                             eprintln!("warning: idle indexing error: {e:#}");
                         }
-                        eprintln!("weft daemon: finished indexing. Graceful auto-exit complete.");
+                        eprintln!(
+                            "weft daemon: idle action complete. Graceful auto-exit complete."
+                        );
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(50));

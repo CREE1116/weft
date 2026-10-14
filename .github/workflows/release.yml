@@ -39,8 +39,32 @@ jobs:
           name: weft-${{ matrix.asset }}
           path: dist/*.tar.gz
           if-no-files-found: error
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            asset: arm64
+          - os: macos-15-intel
+            asset: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build signed desktop app and installer
+        env:
+          WEFT_APP_VERSION: ${{ github.ref_name }}
+        run: scripts/build-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weft-desktop-${{ matrix.asset }}
+          path: |
+            dist/Weft-*.dmg
+            dist/Weft-*.zip
+          if-no-files-found: error
   publish:
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -48,7 +72,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Create checksums
-        run: sha256sum dist/*.tar.gz > dist/SHA256SUMS
+        run: sha256sum dist/*.tar.gz dist/*.zip dist/*.dmg > dist/SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

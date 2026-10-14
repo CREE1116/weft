@@ -1,9 +1,66 @@
 use crate::native::NativeModel;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
+const STDERR_TAIL_LIMIT: usize = 8 * 1024;
+
+// Drain stderr continuously: an unconsumed pipe could block the embedding
+// worker, and an inherited pipe cannot be inspected after a native crash.
+fn collect_stderr(mut stderr: impl Read + Send + 'static) -> (Arc<Mutex<Vec<u8>>>, JoinHandle<()>) {
+    let tail = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&tail);
+    let reader = std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(len) = stderr.read(&mut buffer) {
+            if len == 0 {
+                break;
+            }
+            let _ = std::io::stderr().write_all(&buffer[..len]);
+            if let Ok(mut recorded) = shared.lock() {
+                recorded.extend_from_slice(&buffer[..len]);
+                if recorded.len() > STDERR_TAIL_LIMIT {
+                    let excess = recorded.len() - STDERR_TAIL_LIMIT;
+                    recorded.drain(..excess);
+                }
+            }
+        }
+    });
+    (tail, reader)
+}
+
+fn python_failure(
+    child: &mut Child,
+    tail: &Arc<Mutex<Vec<u8>>>,
+    reader: &mut Option<JoinHandle<()>>,
+    reason: &str,
+) -> anyhow::Error {
+    let status = if reason == "EOF before reply" {
+        child.wait().ok()
+    } else {
+        child.try_wait().ok().flatten()
+    };
+    if status.is_some() {
+        // When the process has exited, finish draining its diagnostics first.
+        if let Some(reader) = reader.take() {
+            let _ = reader.join();
+        }
+    }
+    let excerpt = tail
+        .lock()
+        .map(|log| String::from_utf8_lossy(&log).trim().to_string())
+        .unwrap_or_default();
+    let status = status.map_or_else(|| "status unavailable".to_string(), |s| s.to_string());
+    if excerpt.is_empty() {
+        anyhow::anyhow!("Python embedding bridge failed ({status}): {reason}")
+    } else {
+        anyhow::anyhow!("Python embedding bridge failed ({status}): {reason}; stderr: {excerpt}")
+    }
+}
 
 fn python_program() -> String {
     std::env::var("WEFT_PYTHON")
@@ -35,6 +92,8 @@ pub enum Embedder {
         child: Child,
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
+        stderr_tail: Arc<Mutex<Vec<u8>>>,
+        stderr_reader: Option<JoinHandle<()>>,
     },
 }
 
@@ -76,7 +135,7 @@ impl Embedder {
                     .args(if text_only { vec!["--text-only"] } else { vec![] })
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::inherit())
+                    .stderr(Stdio::piped())
                     .spawn()
                     .context("starting Python embedding bridge (set WEFT_PYTHON to a Python with sentence-transformers installed)")?;
                 let stdin = child
@@ -89,10 +148,18 @@ impl Embedder {
                         .take()
                         .context("Python bridge stdout unavailable")?,
                 );
+                let (stderr_tail, stderr_reader) = collect_stderr(
+                    child
+                        .stderr
+                        .take()
+                        .context("Python bridge stderr unavailable")?,
+                );
                 Ok(Self::Python {
                     child,
                     stdin,
                     stdout,
+                    stderr_tail,
+                    stderr_reader: Some(stderr_reader),
                 })
             }
             _ => bail!("backend must be native, http, or python"),
@@ -159,6 +226,8 @@ impl Embedder {
                 child,
                 stdin,
                 stdout,
+                stderr_tail,
+                stderr_reader,
             } => {
                 let arr: Vec<Value> = inputs
                     .iter()
@@ -171,24 +240,32 @@ impl Embedder {
                     Ok(())
                 })();
                 if let Err(error) = send_result {
-                    if let Ok(Some(status)) = child.try_wait() {
-                        bail!(
-                            "Python embedding bridge exited with {status} before replying (request write failed: {error}); inspect the Python error printed above"
-                        );
-                    }
-                    return Err(error).context("writing request to Python embedding bridge");
+                    return Err(python_failure(
+                        child,
+                        stderr_tail,
+                        stderr_reader,
+                        &format!("writing request: {error}"),
+                    ));
                 }
                 let mut line = String::new();
-                if stdout.read_line(&mut line)? == 0 {
-                    let status = child
-                        .try_wait()
-                        .ok()
-                        .flatten()
-                        .map(|status| status.to_string())
-                        .unwrap_or_else(|| "without an exit status".to_string());
-                    bail!(
-                        "Python embedding bridge exited {status} without replying; inspect the Python error printed above"
-                    );
+                match stdout.read_line(&mut line) {
+                    Ok(0) => {
+                        return Err(python_failure(
+                            child,
+                            stderr_tail,
+                            stderr_reader,
+                            "EOF before reply",
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(python_failure(
+                            child,
+                            stderr_tail,
+                            stderr_reader,
+                            &format!("reading reply: {error}"),
+                        ));
+                    }
+                    Ok(_) => {}
                 }
                 let response: Value =
                     serde_json::from_str(&line).context("invalid Python bridge response")?;
@@ -223,9 +300,17 @@ impl Embedder {
 
 impl Drop for Embedder {
     fn drop(&mut self) {
-        if let Self::Python { child, .. } = self {
+        if let Self::Python {
+            child,
+            stderr_reader,
+            ..
+        } = self
+        {
             let _ = child.kill();
             let _ = child.wait();
+            if let Some(reader) = stderr_reader.take() {
+                let _ = reader.join();
+            }
         }
     }
 }
@@ -240,4 +325,58 @@ fn parse_vec(v: &Value) -> Result<Vec<f32>> {
                 .context("invalid embedding coordinate")
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_bridge_retains_stderr_and_exit_status_on_crash() {
+        if Command::new(python_program())
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // Python is optional for native-only installations.
+        }
+        let path = std::env::temp_dir().join(format!(
+            "weft-bridge-test-{}-{}.py",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "import sys\nsys.stdin.readline()\nprint('media-decode-test-error', file=sys.stderr, flush=True)\nsys.exit(23)\n",
+        )
+        .unwrap();
+        let result = (|| -> Result<String> {
+            let mut bridge = Embedder::new(
+                "python",
+                "",
+                "mock",
+                Path::new(""),
+                "cpu",
+                Some(&path),
+                false,
+            )?;
+            let error = bridge
+                .embed(
+                    &[Input {
+                        kind: "image",
+                        value: "fake.png".into(),
+                    }],
+                    "document",
+                )
+                .unwrap_err();
+            Ok(error.to_string())
+        })();
+        let _ = std::fs::remove_file(path);
+        let message = result.unwrap();
+        assert!(message.contains("media-decode-test-error"), "{message}");
+        assert!(message.contains("23"), "{message}");
+    }
 }

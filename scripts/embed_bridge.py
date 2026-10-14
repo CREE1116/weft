@@ -10,9 +10,12 @@ def main():
     parser.add_argument("--text-only", action="store_true")
     args = parser.parse_args()
     try:
+        import torch
         from sentence_transformers import SentenceTransformer
         config_kwargs = {"vision_config": None, "audio_config": None} if args.text_only else {}
-        model = SentenceTransformer(args.model, config_kwargs=config_kwargs)
+        # The native indexer uses Metal too. Running this second model on CPU
+        # avoids both inference engines competing for the Mac's shared GPU RAM.
+        model = SentenceTransformer(args.model, device="cpu", config_kwargs=config_kwargs)
     except Exception as exc:
         print(f"Cannot load {args.model}: {exc}", file=sys.stderr)
         raise SystemExit(1)
@@ -22,17 +25,20 @@ def main():
             request = json.loads(line)
             inputs = request["inputs"]
             role = request.get("role", "document")
-            if not inputs:
-                vectors = []
-            elif all(i["kind"] == "text" for i in inputs):
-                texts = [i["value"] for i in inputs]
-                if role == "query":
-                    vectors = model.encode(texts, prompt_name="SearchQuery").tolist()
+            # Limit transient activation/decoder memory, especially on Apple
+            # Silicon where the native indexer and this worker share RAM.
+            with torch.inference_mode():
+                if not inputs:
+                    vectors = []
+                elif all(i["kind"] == "text" for i in inputs):
+                    texts = [i["value"] for i in inputs]
+                    if role == "query":
+                        vectors = model.encode(texts, prompt_name="SearchQuery", batch_size=8).tolist()
+                    else:
+                        vectors = model.encode(texts, prompt_name="Document", batch_size=8).tolist()
                 else:
-                    vectors = model.encode(texts, prompt_name="Document").tolist()
-            else:
-                items = [{i["kind"]: i["value"]} for i in inputs]
-                vectors = model.encode(items).tolist()
+                    items = [{i["kind"]: i["value"]} for i in inputs]
+                    vectors = model.encode(items, batch_size=1).tolist()
             print(json.dumps({"embeddings": vectors}), flush=True)
         except Exception as exc:
             print(json.dumps({"error": str(exc)}), flush=True)

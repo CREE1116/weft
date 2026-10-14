@@ -3,6 +3,85 @@ use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
+
+const HANGUL_INITIALS: [char; 19] = [
+    'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ',
+    'ㅌ', 'ㅍ', 'ㅎ',
+];
+
+fn initial_consonant(c: char) -> Option<char> {
+    let code = c as u32;
+    if (0xAC00..=0xD7A3).contains(&code) {
+        Some(HANGUL_INITIALS[((code - 0xAC00) / 588) as usize])
+    } else if (0x1100..=0x1112).contains(&code) {
+        Some(HANGUL_INITIALS[(code - 0x1100) as usize])
+    } else if HANGUL_INITIALS.contains(&c) {
+        Some(c)
+    } else {
+        None
+    }
+}
+
+/// NFC makes macOS decomposed filenames searchable. Only consonants in the
+/// query act as initials; literal syllables, vowels, punctuation and extensions
+/// retain their exact meaning. Initials never match a file's parent directory.
+struct FilenameMatcher {
+    terms: Vec<(String, Vec<char>, bool)>,
+}
+impl FilenameMatcher {
+    fn new(query: &str) -> Self {
+        let terms = query
+            .split_whitespace()
+            .map(|term| {
+                let literal: String = term.nfc().flat_map(char::to_lowercase).collect();
+                let chars: Vec<char> = literal.chars().collect();
+                let initials = chars.iter().any(|&c| {
+                    HANGUL_INITIALS.contains(&c) || (0x1100..=0x1112).contains(&(c as u32))
+                });
+                (literal, chars, initials)
+            })
+            .collect();
+        Self { terms }
+    }
+    fn normalize(path: &str) -> String {
+        path.nfc().flat_map(char::to_lowercase).collect()
+    }
+    fn matches_normalized(&self, normalized: &str, name_only: bool) -> bool {
+        let name = Path::new(normalized)
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or("");
+        let needs_initials = self.terms.iter().any(|(_, _, initials)| *initials);
+        let name_chars: Vec<char> = if needs_initials {
+            name.chars().collect()
+        } else {
+            Vec::new()
+        };
+        self.terms.iter().all(|(literal, term, initials)| {
+            let candidate = if *initials || name_only {
+                name
+            } else {
+                normalized
+            };
+            if !initials {
+                return candidate.contains(literal);
+            }
+            name_chars.windows(term.len()).any(|window| {
+                window.iter().zip(term).all(|(&actual, &query)| {
+                    if HANGUL_INITIALS.contains(&query)
+                        || (0x1100..=0x1112).contains(&(query as u32))
+                    {
+                        initial_consonant(actual) == initial_consonant(query)
+                    } else {
+                        actual == query
+                    }
+                })
+            })
+        })
+    }
+}
 
 pub type PackedChunk = (usize, usize, Vec<u8>, Option<[u8; 32]>);
 
@@ -39,7 +118,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, hash TEXT NOT NULL,
-                kind TEXT NOT NULL, bytes INTEGER NOT NULL
+                kind TEXT NOT NULL, bytes INTEGER NOT NULL, stat_sig TEXT
             );
             CREATE TABLE IF NOT EXISTS chunks (
                 doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -48,6 +127,9 @@ impl Store {
             );
             CREATE TABLE IF NOT EXISTS views (
                 name TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT
+            );
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                input_hash BLOB PRIMARY KEY, embedding BLOB NOT NULL
             );",
         )?;
         // Additive migration: legacy vectors remain readable and legacy writers
@@ -62,6 +144,16 @@ impl Store {
         };
         if !has_hash {
             tx.execute("ALTER TABLE chunks ADD COLUMN input_hash BLOB", [])?;
+        }
+        let has_stat = {
+            let mut stmt = tx.prepare("PRAGMA table_info(documents)")?;
+            let names = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            names.iter().any(|name| name == "stat_sig")
+        };
+        if !has_stat {
+            tx.execute("ALTER TABLE documents ADD COLUMN stat_sig TEXT", [])?;
         }
         tx.commit()?;
         // Derive the companion mmap vector cache path next to the sqlite file.
@@ -146,6 +238,39 @@ impl Store {
             .optional()?;
         Ok(found.as_deref() == Some(hash))
     }
+    /// Fast path for unchanged files. An optional full-hash scan can override it.
+    pub fn unchanged_stat(&self, path: &str, kind: &str, stat: &str) -> Result<bool> {
+        let found: Option<(String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT kind,stat_sig FROM documents WHERE path=?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(found.is_some_and(|(stored_kind, stored_stat)| {
+            stored_kind == kind && stored_stat.as_deref() == Some(stat)
+        }))
+    }
+    pub fn set_stat(&self, path: &str, stat: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE documents SET stat_sig=?2 WHERE path=?1",
+            params![path, stat],
+        )?;
+        Ok(())
+    }
+
+    /// Persistent content-addressed reuse across files, moves and later scans.
+    pub fn cached_embedding(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        self.conn
+            .query_row(
+                "SELECT embedding FROM embedding_cache WHERE input_hash=?1",
+                [&hash[..]],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
     /// Avoid downgrading already indexed media to filename-only during a
     /// subsequent default `index --all` that did not request media inference.
     pub fn has_media_embedding(&self, path: &str) -> Result<bool> {
@@ -167,7 +292,7 @@ impl Store {
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("INSERT INTO documents(path,hash,kind,bytes) VALUES (?1,?2,?3,?4)
-                    ON CONFLICT(path) DO UPDATE SET hash=excluded.hash,kind=excluded.kind,bytes=excluded.bytes",
+                    ON CONFLICT(path) DO UPDATE SET hash=excluded.hash,kind=excluded.kind,bytes=excluded.bytes,stat_sig=NULL",
                     params![path, hash, kind, bytes as i64])?;
         let id: i64 = tx.query_row("SELECT id FROM documents WHERE path=?1", [path], |r| {
             r.get(0)
@@ -184,6 +309,10 @@ impl Store {
                     vec,
                     hash.as_ref().map(|h| &h[..])
                 ])?;
+                if let Some(hash) = hash {
+                    tx.execute("INSERT OR IGNORE INTO embedding_cache(input_hash,embedding) VALUES (?1,?2)",
+                        params![&hash[..], vec])?;
+                }
             }
         }
         tx.commit()?;
@@ -209,6 +338,24 @@ impl Store {
             }
         }
         Ok(deleted)
+    }
+    /// Delete a removed path or a removed subtree; chunk vectors remain in the
+    /// global cache so a subsequent rename can reuse them.
+    pub fn remove_missing(&mut self, path: &Path) -> Result<usize> {
+        let mut stmt = self.conn.prepare("SELECT path FROM documents")?;
+        let paths = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let tx = self.conn.transaction()?;
+        let mut removed = 0;
+        for candidate in paths {
+            if Path::new(&candidate).starts_with(path) {
+                removed += tx.execute("DELETE FROM documents WHERE path=?1", [candidate])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
     pub fn cached_chunks(&self, path: &str) -> Result<std::collections::HashMap<Vec<u8>, Vec<u8>>> {
         let mut stmt = self.conn.prepare("SELECT c.input_hash,c.embedding FROM chunks c JOIN documents d ON d.id=c.doc_id WHERE d.path=?1 AND c.input_hash IS NOT NULL")?;
@@ -391,6 +538,107 @@ impl Store {
         }
         Ok(out)
     }
+    /// Metadata-only paths at all three retrieval levels. No vectors or source
+    /// contents are read; folder results are deduplicated indexed ancestors.
+    pub fn locate(&self, query: &str, level: &str, limit: usize) -> Result<Vec<Hit>> {
+        let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        if level == "file" {
+            let matcher = FilenameMatcher::new(query);
+            let mut statement = self
+                .conn
+                .prepare("SELECT path,kind FROM documents ORDER BY path")?;
+            let mut rows = statement.query([])?;
+            let mut hits = Vec::new();
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                let normalized = FilenameMatcher::normalize(&path);
+                let name_match = matcher.matches_normalized(&normalized, true);
+                if name_match || matcher.matches_normalized(&normalized, false) {
+                    hits.push((
+                        !name_match,
+                        Hit {
+                            path,
+                            kind: row.get(1)?,
+                            line_kind: "none",
+                            score: 1.0,
+                            start_line: 0,
+                            end_line: 0,
+                            chunk_index: None,
+                        },
+                    ));
+                }
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.path.cmp(&b.1.path)));
+            hits.truncate(limit);
+            return Ok(hits.into_iter().map(|(_, hit)| hit).collect());
+        }
+        let mut out = Vec::new();
+        if level == "folder" {
+            let mut folders = std::collections::BTreeSet::new();
+            let mut statement = self.conn.prepare("SELECT path FROM documents")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                for parent in Path::new(&path).ancestors().skip(1) {
+                    let value = parent.to_string_lossy();
+                    if terms.iter().all(|term| value.to_lowercase().contains(term)) {
+                        folders.insert(value.into_owned());
+                    }
+                }
+            }
+            for path in folders {
+                out.push(Hit {
+                    path,
+                    kind: "folder".into(),
+                    score: 1.0,
+                    line_kind: "none",
+                    start_line: 0,
+                    end_line: 0,
+                    chunk_index: None,
+                });
+            }
+            out.sort_by_key(|hit| {
+                let name = Path::new(&hit.path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase();
+                (
+                    !terms.iter().all(|term| name.contains(term)),
+                    hit.path.clone(),
+                )
+            });
+            out.truncate(limit);
+        } else if level == "chunk" {
+            let mut statement = self.conn.prepare("SELECT d.path,d.kind,c.start_line,c.end_line,c.ordinal FROM documents d JOIN chunks c ON c.doc_id=d.id WHERE d.kind='text' ORDER BY d.path,c.ordinal")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                if !terms.iter().all(|term| path.to_lowercase().contains(term)) {
+                    continue;
+                }
+                out.push(Hit {
+                    line_kind: crate::document::line_kind(&path, "text"),
+                    path,
+                    kind: row.get(1)?,
+                    score: 1.0,
+                    start_line: row.get::<_, i64>(2)? as usize,
+                    end_line: row.get::<_, i64>(3)? as usize,
+                    chunk_index: Some(row.get::<_, i64>(4)? as usize),
+                });
+                if out.len() == limit {
+                    break;
+                }
+            }
+        } else {
+            bail!("unknown path level: {level}");
+        }
+        Ok(out)
+    }
+
     /// Indexed coverage only: does not walk source files or start inference.
     pub fn coverage(&self, under: &Path, kind: Option<&str>) -> Result<(usize, usize, usize)> {
         let mut stmt = self.conn.prepare(
@@ -1240,6 +1488,89 @@ pub fn encode(v: &[f32], enc: Encoding) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn filename_initial_search_handles_nfc_nfd_mixed_queries_and_parent_scoping() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        for path in [
+            "/docs/데이터베이스.pdf",
+            "/docs/회의자료.PDF",
+            "/docs/회의록.pdf",
+            "/docs/까치.md",
+            "/회의자료/plain.pdf",
+        ] {
+            store.replace(path, "hash", "text", 1, &[]).unwrap();
+        }
+        assert_eq!(
+            store.locate("ㄷㅇㅌㅂㅇㅅ", "file", 30).unwrap()[0].path,
+            "/docs/데이터베이스.pdf"
+        );
+        assert_eq!(store.locate("ㅎㅇ.pdf", "file", 30).unwrap().len(), 0); // initials remain contiguous
+        assert_eq!(store.locate("ㅎㅇㅈㄹ.pdf", "file", 30).unwrap().len(), 1);
+        assert_eq!(store.locate("회ㅇ", "file", 30).unwrap().len(), 2);
+        assert_eq!(store.locate("ㅎㅇ .pdf", "file", 30).unwrap().len(), 2);
+        assert_eq!(store.locate("회의록", "file", 30).unwrap().len(), 1);
+        assert_eq!(store.locate("회의록", "file", 30).unwrap().len(), 1);
+        assert_eq!(store.locate("ㄲㅊ", "file", 30).unwrap().len(), 1);
+        assert!(store.locate("ㄱㅊ", "file", 30).unwrap().is_empty());
+        assert_eq!(store.locate("ㅎㅇ", "file", 1).unwrap().len(), 1);
+        assert_eq!(store.locate("plain.pdf", "file", 30).unwrap().len(), 1);
+    }
+    #[test]
+    fn locate_returns_files_folders_and_chunks_without_inference() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let chunks = vec![
+            (2, 5, encode(&[1.0, 0.0], Encoding::Q8), None),
+            (6, 10, encode(&[0.0, 1.0], Encoding::Q8), None),
+        ];
+        store
+            .replace("/docs/budget/report.md", "hash", "text", 10, &chunks)
+            .unwrap();
+        store
+            .replace("/docs/budget/notes.md", "hash", "text", 10, &chunks)
+            .unwrap();
+        assert_eq!(store.locate("report", "file", 30).unwrap().len(), 1);
+        let folders = store.locate("budget", "folder", 30).unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(
+            (&*folders[0].path, &*folders[0].kind),
+            ("/docs/budget", "folder")
+        );
+        let hits = store.locate("report", "chunk", 30).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            (hits[1].start_line, hits[1].end_line, hits[1].chunk_index),
+            (6, 10, Some(1))
+        );
+        assert!(store.locate("", "file", 30).unwrap().is_empty());
+        assert_eq!(store.locate("report", "chunk", 1).unwrap().len(), 1);
+    }
+    #[test]
+    fn metadata_and_global_embedding_caches_survive_replacement_and_removal() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let input_hash = [7u8; 32];
+        let embedding = encode(&[1.0, 0.0], Encoding::Q8);
+        let vectors = vec![(1, 1, embedding.clone(), Some(input_hash))];
+        store
+            .replace("/docs/a.txt", "file-hash", "text", 12, &vectors)
+            .unwrap();
+        store.set_stat("/docs/a.txt", "stamp-1").unwrap();
+        assert!(
+            store
+                .unchanged_stat("/docs/a.txt", "text", "stamp-1")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .unchanged_stat("/docs/a.txt", "text", "stamp-2")
+                .unwrap()
+        );
+        assert_eq!(
+            store.cached_embedding(&input_hash).unwrap().unwrap(),
+            embedding
+        );
+        assert_eq!(store.remove_missing(Path::new("/docs/a.txt")).unwrap(), 1);
+        assert!(store.cached_embedding(&input_hash).unwrap().is_some());
+    }
     #[test]
     #[ignore = "local flush microbenchmark on an isolated DB copy; WEFT_FLUSH_BENCH_DB"]
     fn benchmark_snapshot_flush() {

@@ -1,6 +1,34 @@
 //! Filesystem discovery and exclusions shared by desktop and folder indexing.
 use std::path::{Path, PathBuf};
 
+/// Filesystem metadata used only as a fast unchanged-file hint. Force an
+/// occasional full-hash scan to verify sources on unreliable filesystems.
+pub fn file_stamp(meta: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            meta.len(),
+            meta.dev(),
+            meta.ino(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        format!(
+            "{}:{:?}:{:?}",
+            meta.len(),
+            meta.modified().ok(),
+            meta.created().ok()
+        )
+    }
+}
+
 pub fn computer_root() -> PathBuf {
     #[cfg(windows)]
     {
@@ -13,6 +41,23 @@ pub fn computer_root() -> PathBuf {
     {
         PathBuf::from("/")
     }
+}
+
+/// Shared across the first scan and every watch event. Empty selects all types.
+pub fn selected_type(path: &Path, selected: &[String]) -> bool {
+    if selected.is_empty() {
+        return true;
+    }
+    let category = match crate::document::format(path) {
+        Some("pdf") => "pdf",
+        Some("docx" | "odt") => "word",
+        Some("pptx" | "odp") => "slides",
+        Some("xlsx" | "ods") => "sheets",
+        Some("epub" | "hwpx") => "ebooks",
+        _ if crate::chunk::supported(path) => "text",
+        _ => crate::chunk::media_kind(path).unwrap_or("other"),
+    };
+    selected.iter().any(|value| value == category)
 }
 
 pub fn excluded(path: &Path, computer: bool, extra: &[PathBuf]) -> bool {
@@ -131,7 +176,8 @@ pub fn excluded(path: &Path, computer: bool, extra: &[PathBuf]) -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    name == ".env"
+    name.starts_with("~$")
+        || name == ".env"
         || name.starts_with(".env.")
         || name.starts_with("id_rsa")
         || name.starts_with("id_ed25519")
@@ -158,6 +204,27 @@ pub fn filename_text(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_file_types_are_case_insensitive_and_shared_with_watch() {
+        let selected = vec!["pdf".into(), "word".into(), "image".into()];
+        for name in ["lecture.PDF", "report.docx", "report.ODT", "picture.png"] {
+            assert!(selected_type(Path::new(name), &selected));
+        }
+        for name in [
+            "slides.pptx",
+            "table.xlsx",
+            "book.epub",
+            "main.rs",
+            "sound.mp3",
+            "movie.mp4",
+            "archive.zip",
+        ] {
+            assert!(!selected_type(Path::new(name), &selected));
+        }
+        assert!(selected_type(Path::new("anything.bin"), &[]));
+        assert!(selected_type(Path::new("main.rs"), &["text".into()]));
+        assert!(selected_type(Path::new("archive.zip"), &["other".into()]));
+    }
     #[test]
     fn exclusions_prune_sensitive_and_generated_paths() {
         for p in [
@@ -195,5 +262,7 @@ mod tests {
             true,
             &["/Users/me/Downloads".into()]
         ));
+        assert!(excluded(Path::new("/docs/~$report.docx"), false, &[]));
+        assert!(!excluded(Path::new("/docs/report.docx"), false, &[]));
     }
 }

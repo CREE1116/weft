@@ -21,6 +21,8 @@ pub fn format(path: &Path) -> Option<&'static str> {
         "odt" => Some("odt"),
         "odp" => Some("odp"),
         "ods" => Some("ods"),
+        "hwpx" => Some("hwpx"),
+        "epub" => Some("epub"),
         _ => None,
     }
 }
@@ -139,12 +141,12 @@ pub fn extract(path: &Path, bytes: &[u8], images: bool) -> Result<Extracted> {
         bail!("document exceeds 32 MiB input limit");
     }
     let Some(format) = format(path) else {
-        let text = std::str::from_utf8(bytes).context("not a supported document or UTF-8 text")?;
+        let text = decode_source(path, bytes)?;
         if text.len() > TEXT_LIMIT || text.contains('\0') {
             bail!("invalid or oversized source text");
         }
         let mut result = Extracted::new("text");
-        result.text = text.into();
+        result.text = text;
         return Ok(result);
     };
     if format == "pdf" {
@@ -221,6 +223,37 @@ pub fn extract(path: &Path, bytes: &[u8], images: bool) -> Result<Extracted> {
                     "sheet",
                     labels.get(number).context("missing sheet name")?,
                     &sheet_text(&read_part(&mut archive, &part)?, &shared)?,
+                )?;
+            }
+        }
+        "hwpx" => {
+            let mut sections: Vec<_> = names
+                .iter()
+                .filter(|name| name.starts_with("Contents/section") && name.ends_with(".xml"))
+                .collect();
+            sections.sort_by_key(|name| {
+                name.trim_start_matches("Contents/section")
+                    .trim_end_matches(".xml")
+                    .parse::<usize>()
+                    .unwrap_or(usize::MAX)
+            });
+            if sections.is_empty() {
+                bail!("HWPX contains no Contents/section*.xml");
+            }
+            for name in sections {
+                result.part(
+                    "section",
+                    name,
+                    &xml_text(&read_part(&mut archive, name)?, false)?,
+                )?;
+            }
+        }
+        "epub" => {
+            for part in epub_spine(&mut archive, &names)? {
+                result.part(
+                    "chapter",
+                    &part,
+                    &xhtml_text(&read_part(&mut archive, &part)?)?,
                 )?;
             }
         }
@@ -303,6 +336,176 @@ pub fn extract(path: &Path, bytes: &[u8], images: bool) -> Result<Extracted> {
             .push("no_extractable_text; OCR is not implemented".into());
     }
     Ok(result)
+}
+
+/// UTF-8 first, then BOM-marked UTF-16, then strict CP949 for familiar text
+/// formats. Reject undecodable data instead of silently indexing mojibake.
+pub fn decode_source(path: &Path, bytes: &[u8]) -> Result<String> {
+    if let Ok(value) = std::str::from_utf8(bytes) {
+        return Ok(value.trim_start_matches('\u{feff}').to_owned());
+    }
+    if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        if (bytes.len() - 2) % 2 != 0 {
+            bail!("invalid UTF-16 byte length");
+        }
+        let little = bytes[0] == 0xff;
+        let units = bytes[2..].chunks_exact(2).map(|pair| {
+            if little {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        });
+        return String::from_utf16(&units.collect::<Vec<_>>()).context("invalid UTF-16 text");
+    }
+    let ext = path
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(ext.as_str(), "txt" | "csv" | "md" | "log" | "tsv" | "srt") {
+        let (value, _, invalid) = encoding_rs::EUC_KR.decode(bytes);
+        if !invalid && !value.contains('\0') {
+            return Ok(value.into_owned());
+        }
+    }
+    bail!("unsupported text encoding (expected UTF-8, BOM-marked UTF-16, or CP949 text)")
+}
+
+/// Read OPF spine in reading order; fall back to sorted XHTML parts in EPUBs
+/// without a conventional container manifest.
+fn epub_spine(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    names: &[String],
+) -> Result<Vec<String>> {
+    let mut ordered = Vec::new();
+    if names.iter().any(|name| name == "META-INF/container.xml") {
+        let container = read_part(archive, "META-INF/container.xml")?;
+        let opf = attributes(&container, b"rootfile", b"full-path")?
+            .into_iter()
+            .next();
+        if let Some(opf) = opf {
+            let data = read_part(archive, &opf)?;
+            let mut reader = Reader::from_reader(data.as_slice());
+            let mut manifest = HashMap::new();
+            let mut refs = Vec::new();
+            loop {
+                match reader.read_event()? {
+                    Event::Start(e) | Event::Empty(e) => {
+                        if e.local_name().as_ref() == b"item" {
+                            let mut id = None;
+                            let mut href = None;
+                            for attr in e.attributes() {
+                                let attr = attr?;
+                                let value = attr
+                                    .decode_and_unescape_value(reader.decoder())?
+                                    .into_owned();
+                                match attr.key.as_ref() {
+                                    b"id" => id = Some(value),
+                                    b"href" => href = Some(value),
+                                    _ => {}
+                                }
+                            }
+                            if let (Some(id), Some(href)) = (id, href) {
+                                manifest.insert(id, href);
+                            }
+                        } else if e.local_name().as_ref() == b"itemref" {
+                            for attr in e.attributes() {
+                                let attr = attr?;
+                                if attr.key.as_ref() == b"idref" {
+                                    refs.push(
+                                        attr.decode_and_unescape_value(reader.decoder())?
+                                            .into_owned(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Event::DocType(_) => bail!("EPUB DTD is not supported"),
+                    Event::Eof => break,
+                    _ => {}
+                }
+            }
+            let base = Path::new(&opf)
+                .parent()
+                .and_then(Path::to_str)
+                .unwrap_or("");
+            for id in refs {
+                let href = manifest
+                    .get(&id)
+                    .with_context(|| format!("missing EPUB spine item {id}"))?;
+                let part = resolve_part(base, href.split('#').next().unwrap_or(""))?;
+                if !names.contains(&part) {
+                    bail!("missing EPUB chapter: {part}");
+                }
+                ordered.push(part);
+            }
+        }
+    }
+    if ordered.is_empty() {
+        ordered = names
+            .iter()
+            .filter(|name| name.ends_with(".xhtml") || name.ends_with(".html"))
+            .cloned()
+            .collect();
+        ordered.sort();
+    }
+    if ordered.is_empty() {
+        bail!("EPUB contains no readable chapters");
+    }
+    Ok(ordered)
+}
+
+fn xhtml_text(xml: &[u8]) -> Result<String> {
+    let mut reader = Reader::from_reader(xml);
+    let mut text = String::new();
+    let mut excluded_depth = 0usize;
+    let mut inside_body = false;
+    loop {
+        match reader.read_event()? {
+            Event::Start(e) => {
+                let name = e.local_name();
+                let name = name.as_ref();
+                if name == b"body" {
+                    inside_body = true;
+                }
+                if excluded_depth > 0 || matches!(name, b"style" | b"script" | b"svg") {
+                    excluded_depth += 1;
+                }
+            }
+            Event::End(e) => {
+                let name = e.local_name();
+                if excluded_depth > 0 {
+                    excluded_depth -= 1;
+                } else if inside_body
+                    && matches!(
+                        name.as_ref(),
+                        b"p" | b"div" | b"li" | b"h1" | b"h2" | b"h3" | b"h4" | b"tr"
+                    )
+                {
+                    text.push('\n');
+                }
+                if name.as_ref() == b"body" {
+                    inside_body = false;
+                }
+            }
+            Event::Empty(e) if excluded_depth == 0 && e.local_name().as_ref() == b"br" => {
+                text.push('\n')
+            }
+            Event::Text(e) if inside_body && excluded_depth == 0 => text.push_str(&e.decode()?),
+            Event::CData(e) if inside_body && excluded_depth == 0 => text.push_str(&e.decode()?),
+            Event::GeneralRef(e) if inside_body && excluded_depth == 0 => {
+                text.push_str(&quick_xml::escape::unescape(&format!("&{};", e.decode()?))?)
+            }
+            Event::DocType(_) => bail!("EPUB DTD is not supported"),
+            Event::Eof => break,
+            _ => {}
+        }
+        if text.len() > TEXT_LIMIT {
+            bail!("EPUB chapter exceeds 2 MiB text limit");
+        }
+    }
+    Ok(text)
 }
 
 fn read_part(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<Vec<u8>> {
@@ -759,6 +962,46 @@ mod tests {
         let huge = vec![b'a'; PART_LIMIT + 1];
         let bytes = archive(&[("word/document.xml", &huge)]);
         assert!(extract(Path::new("a.docx"), &bytes, false).is_err());
+    }
+    #[test]
+    fn hwpx_sections_and_epub_spine_are_read_in_order() {
+        let hwpx = archive(&[
+            (
+                "Contents/section1.xml",
+                b"<root><hp:p><hp:run><hp:t>Second section</hp:t></hp:run></hp:p></root>",
+            ),
+            (
+                "Contents/section0.xml",
+                b"<root><hp:p><hp:run><hp:t>First section</hp:t></hp:run></hp:p></root>",
+            ),
+        ]);
+        let doc = extract(Path::new("a.hwpx"), &hwpx, false).unwrap();
+        assert!(doc.text.find("First section").unwrap() < doc.text.find("Second section").unwrap());
+
+        let epub = archive(&[
+            ("META-INF/container.xml", b"<container><rootfiles><rootfile full-path='OPS/book.opf'/></rootfiles></container>"),
+            ("OPS/book.opf", b"<package><manifest><item id='b' href='b.xhtml'/><item id='a' href='a.xhtml'/></manifest><spine><itemref idref='a'/><itemref idref='b'/></spine></package>"),
+            ("OPS/a.xhtml", b"<html><head><title>Hidden</title></head><body><p>First chapter</p><script>ignored()</script></body></html>"),
+            ("OPS/b.xhtml", b"<html><body><p>Second chapter</p></body></html>"),
+        ]);
+        let doc = extract(Path::new("a.epub"), &epub, false).unwrap();
+        assert!(doc.text.find("First chapter").unwrap() < doc.text.find("Second chapter").unwrap());
+        assert!(!doc.text.contains("Hidden") && !doc.text.contains("ignored"));
+    }
+    #[test]
+    fn plain_text_supports_utf16_and_cp949() {
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend("안녕".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(
+            extract(Path::new("a.txt"), &utf16, false).unwrap().text,
+            "안녕"
+        );
+        let (encoded, _, had_errors) = encoding_rs::EUC_KR.encode("한글 문서");
+        assert!(!had_errors);
+        assert_eq!(
+            extract(Path::new("a.txt"), &encoded, false).unwrap().text,
+            "한글 문서"
+        );
     }
     #[test]
     fn declared_zip_expansion_is_rejected_before_decompression() {
