@@ -9,8 +9,8 @@
     <a href="docs/TECHNICAL_REFERENCE.md">기술 문서</a>
   </p>
   <p>
-    <a href="https://github.com/CREE1116/weft/releases/download/v1.0.2/Weft-1.0.2-arm64.dmg">Apple Silicon 다운로드</a> ·
-    <a href="https://github.com/CREE1116/weft/releases/download/v1.0.2/Weft-1.0.2-x86_64.dmg">Intel 다운로드</a>
+    <a href="https://github.com/CREE1116/weft/releases/download/v1.0.3/Weft-1.0.3-arm64.dmg">Apple Silicon 다운로드</a> ·
+    <a href="https://github.com/CREE1116/weft/releases/download/v1.0.3/Weft-1.0.3-x86_64.dmg">Intel 다운로드</a>
   </p>
   <p>
     <img alt="Latest release" src="https://img.shields.io/github/v/release/CREE1116/weft?display_name=tag&color=7655c9" />

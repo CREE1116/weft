@@ -3,6 +3,15 @@ import Carbon
 import QuickLookUI
 import QuickLookThumbnailing
 import QuartzCore
+import SQLite3
+
+enum SearchIndexAvailability {
+    case missing, empty, ready, unavailable
+}
+
+enum IndexedDocumentCount {
+    case missing, available(Int), unavailable
+}
 
 struct Hit: Decodable {
     let path: String
@@ -613,9 +622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             self.focusSearch()
             self.presentingSearch = false
         }
-        if !FileManager.default.fileExists(atPath: db.path) {
-            hint.stringValue = L("아직 인덱스가 없습니다. 메뉴 막대 → 설정 → 인덱싱")
-        }
+        _ = presentUnavailableIndex(Self.searchIndexAvailability(at: db))
     }
 
     @objc func togglePanel() {
@@ -1192,7 +1199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func warmDaemon(force: Bool = false) {
         guard ProcessInfo.processInfo.environment["WEFT_DESKTOP_NO_WARMUP"] != "1",
             force || (UserDefaults.standard.object(forKey: "warmAtOpen") as? Bool ?? true),
-            FileManager.default.fileExists(atPath: db.path), daemonProcess?.isRunning != true else { return }
+            Self.searchIndexAvailability(at: db) == .ready, daemonProcess?.isRunning != true else { return }
         let process = Process()
         process.executableURL = engine
         process.arguments = ["--db", db.path, "daemon", "--socket", daemonSocket.path, "--idle-timeout", "90", "--no-auto-index"]
@@ -1346,7 +1353,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return
         }
         modeBadge.title = mode.selectedSegment == 0 ? L("파일명 ⇥") : L("의미 ⇥")
-        guard !parsedQuery().text.isEmpty else { applyResults([]); return }
+        guard !parsedQuery().text.isEmpty else {
+            applyResults([])
+            if !presentUnavailableIndex(Self.searchIndexAvailability(at: db)) {
+                hint.stringValue = mode.selectedSegment == 0 ? L("검색할 파일명이나 폴더를 입력하세요") : L("입력하면 의미 검색 결과가 갱신됩니다")
+            }
+            return
+        }
         refreshingResults = true
         if operatorPreset() != nil || ["all(", "any(", "avoid("].contains(where: { parsedQuery().text.hasPrefix($0) }) {
             mode.selectedSegment = 1; modeBadge.title = L("의미 ⇥")
@@ -1378,6 +1391,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
+    /// Probe metadata only; never create an index, load vectors, or start a model.
+    static func searchIndexAvailability(at url: URL) -> SearchIndexAvailability {
+        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
+        var database: OpaquePointer?
+        let opened = sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
+        defer { if let database = database { sqlite3_close(database) } }
+        guard opened == SQLITE_OK, let database = database else { return .unavailable }
+        sqlite3_busy_timeout(database, 50)
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT 1 FROM documents LIMIT 1", -1, &statement, nil) == SQLITE_OK else {
+            return .unavailable
+        }
+        defer { sqlite3_finalize(statement) }
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW: return .ready
+        case SQLITE_DONE: return .empty
+        default: return .unavailable
+        }
+    }
+
+    /// Read only SQLite metadata; safe to poll while indexing without loading the model.
+    static func indexedDocumentCount(at url: URL) -> IndexedDocumentCount {
+        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
+        var database: OpaquePointer?
+        let opened = sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
+        defer { if let database = database { sqlite3_close(database) } }
+        guard opened == SQLITE_OK, let database = database else { return .unavailable }
+        sqlite3_busy_timeout(database, 50)
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT COUNT(*) FROM documents", -1, &statement, nil) == SQLITE_OK else {
+            return .unavailable
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return .unavailable }
+        return .available(max(0, Int(sqlite3_column_int64(statement, 0))))
+    }
+
+    @discardableResult
+    func presentUnavailableIndex(_ availability: SearchIndexAvailability) -> Bool {
+        guard availability != .ready else { return false }
+        refreshingResults = false
+        applyResults([])
+        if availability == .unavailable {
+            modeBadge.title = L("인덱스 확인 필요")
+            hint.stringValue = L("인덱스를 읽을 수 없습니다. 설정 → 인덱싱 또는 검색 오류 로그를 확인하세요.")
+        } else if indexProcess?.isRunning == true {
+            modeBadge.title = L("인덱싱 중…")
+            hint.stringValue = L("초기 인덱싱 중입니다. 첫 파일이 등록되면 검색할 수 있습니다.")
+        } else {
+            modeBadge.title = L("인덱스 준비 필요")
+            hint.stringValue = L("검색할 파일이 아직 없습니다. 메뉴 막대 → 설정 → 인덱싱에서 폴더를 추가하세요.")
+        }
+        modeBadge.toolTip = hint.stringValue
+        return true
+    }
+
+    func emptySearchHint(semantic: Bool) -> String {
+        semantic ? L("관련도가 충분한 결과가 없습니다. 검색어를 구체화하거나 Tab으로 파일명 검색을 사용하세요.")
+            : L("일치하는 파일·폴더가 없습니다. 이름이나 검색 범위를 바꿔보세요.")
+    }
+
     func performSearch(retry: Int = 0) {
         // Some IMEs do not commit promptly, or do not send a final change event.
         // Retain the previous hits but cap composition polling so search cannot
@@ -1396,10 +1470,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         cancelSearch()
         let query = parsedQuery()
         guard !query.text.isEmpty else { return }
-        guard FileManager.default.fileExists(atPath: db.path) else {
-            hint.stringValue = L("인덱스가 없습니다. 폴더 및 인덱싱 설정에서 먼저 시작하세요.")
-            return
-        }
+        guard !presentUnavailableIndex(Self.searchIndexAvailability(at: db)) else { return }
         refreshingResults = true
         let token = generation
         let process = Process()
@@ -1470,9 +1541,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 self.applyResults(results ?? [])
                 self.modeBadge.title = initials ? L("초성 · ⇥") : self.mode.selectedSegment == 0 ? L("파일명 ⇥") : L("의미 ⇥")
                 if self.hits.isEmpty { self.modeBadge.title = process.terminationStatus == 0 ? L("0개 · ⇥") : L("오류 · ⇥") }
-                self.hint.stringValue = process.terminationStatus == 0
-                    ? self.hits.isEmpty ? L("관련도가 충분한 결과가 없습니다. 검색어를 구체화하거나 Tab으로 파일명 검색을 사용하세요.") : LF("{0}개 · ↑↓ 선택·미리보기 · ⏎ 열기 · ⌥⏎ Finder · ⌘Y 미리보기 · ⇥ 검색 방식", String(describing: self.hits.count))
-                    : L("검색에 실패했습니다. 모델 파일과 인덱스 설정을 확인하세요.")
+                if self.hits.isEmpty && self.presentUnavailableIndex(Self.searchIndexAvailability(at: self.db)) { return }
+                self.hint.stringValue = process.terminationStatus != 0
+                    ? L("검색에 실패했습니다. 모델 파일과 인덱스 설정을 확인하세요.")
+                    : self.hits.isEmpty ? self.emptySearchHint(semantic: semantic)
+                    : LF("{0}개 · ↑↓ 선택·미리보기 · ⏎ 열기 · ⌥⏎ Finder · ⌘Y 미리보기 · ⇥ 검색 방식", String(describing: self.hits.count))
                 self.modeBadge.toolTip = self.hint.stringValue
             }
         }

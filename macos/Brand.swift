@@ -43,9 +43,50 @@ enum WeftTheme {
         NSGraphicsContext.restoreGraphicsState()
     }
     static var menuImage: NSImage {
-        let image = NSImage(size: NSSize(width: 22, height: 22))
-        image.lockFocus(); drawMark(in: NSRect(x: -1, y: -1, width: 24, height: 24), monochrome: true); image.unlockFocus()
+        let image = NSImage(size: NSSize(width: 22, height: 22), flipped: false) { bounds in
+            // Draw at the destination's resolution; keep equal optical padding on every side.
+            let side = min(bounds.width, bounds.height) * 25 / 22
+            drawMenuMark(in: NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side))
+            return true
+        }
         image.isTemplate = true
         return image
+    }
+    private static func drawMenuMark(in rect: NSRect) {
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let transform = NSAffineTransform()
+        transform.translateX(by: rect.minX, yBy: rect.minY)
+        transform.scaleX(by: rect.width / 100, yBy: rect.height / 100)
+        transform.concat()
+
+        // Lower the weft slightly so the inner crossings leave the W's peak intact.
+        let weftY: CGFloat = 44
+        func mask(_ crossings: [CGFloat], radius: CGFloat) {
+            let clip = NSBezierPath(rect: NSRect(x: -10, y: -10, width: 120, height: 120))
+            clip.windingRule = .evenOdd
+            for x in crossings {
+                clip.appendOval(in: NSRect(x: x - radius, y: weftY - radius, width: radius * 2, height: radius * 2))
+            }
+            clip.addClip()
+        }
+        NSColor.black.setStroke()
+        let w = NSBezierPath()
+        for (i, point) in [NSPoint(x: 20, y: 76), NSPoint(x: 34, y: 24), NSPoint(x: 50, y: 55), NSPoint(x: 66, y: 24), NSPoint(x: 80, y: 76)].enumerated() {
+            if i == 0 { w.move(to: point) } else { w.line(to: point) }
+        }
+        w.lineWidth = 9.5; w.lineCapStyle = .round; w.lineJoinStyle = .round
+        NSGraphicsContext.saveGraphicsState()
+        mask([34 + 20 * 16 / 31, 66 + 20 * 14 / 52], radius: 7)
+        w.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let weft = NSBezierPath()
+        weft.move(to: NSPoint(x: 14, y: weftY)); weft.line(to: NSPoint(x: 86, y: weftY))
+        weft.lineWidth = 5.5; weft.lineCapStyle = .round
+        NSGraphicsContext.saveGraphicsState()
+        mask([20 + 32 * 14 / 52, 50 + 11 * 16 / 31], radius: 7.5)
+        weft.stroke()
+        NSGraphicsContext.restoreGraphicsState()
     }
 }

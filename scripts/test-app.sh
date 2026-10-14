@@ -93,6 +93,28 @@ setup.step = 4; setup.render()
 precondition(setup.indexAfterSetup.state == .off, "setup must never index by default")
 precondition(delegate.indexProcess == nil && !FileManager.default.fileExists(atPath: delegate.db.path))
 
+delegate.updateMenuBarIndexProgress(running: false)
+precondition(delegate.indexRemainingLabel?.stringValue == L("Set up indexing"), "a missing index needs a setup hint")
+precondition(delegate.indexStatusContainer != nil, "the index status remains visible when no scan is running")
+if case .missing = AppDelegate.indexedDocumentCount(at: delegate.db) {} else { preconditionFailure("the status probe must not create an index") }
+var testDatabase: OpaquePointer?
+precondition(sqlite3_open(delegate.db.path, &testDatabase) == SQLITE_OK)
+precondition(sqlite3_exec(testDatabase, "CREATE TABLE documents (id INTEGER PRIMARY KEY)", nil, nil, nil) == SQLITE_OK)
+delegate.refreshMenuBarIndexProgress()
+precondition(delegate.indexRemainingLabel?.stringValue == LF("{0} searchable", "0"), "empty SQLite index must report zero registered files")
+precondition(delegate.indexRegisteredLabel?.stringValue == L("Ready to search"))
+precondition(sqlite3_exec(testDatabase, "INSERT INTO documents (id) VALUES (1)", nil, nil, nil) == SQLITE_OK)
+delegate.refreshMenuBarIndexProgress()
+precondition(delegate.indexRemainingLabel?.stringValue == LF("{0} searchable", "1"), "registered document count must come from SQLite")
+precondition(delegate.indexRemainingLabel?.attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .systemGreen, "available file count should be green")
+precondition(sqlite3_exec(testDatabase, "INSERT INTO documents (id) VALUES (2),(3)", nil, nil, nil) == SQLITE_OK)
+delegate.refreshMenuBarIndexProgress()
+precondition(delegate.indexRemainingLabel?.stringValue == LF("{0} searchable", "3"), "counts must refresh without loading a model")
+precondition(sqlite3_close(testDatabase) == SQLITE_OK)
+let brokenIndex = testRoot.appendingPathComponent("broken.sqlite")
+try Data("not a database".utf8).write(to: brokenIndex)
+if case .unavailable = AppDelegate.indexedDocumentCount(at: brokenIndex) {} else { preconditionFailure("corrupted indexes must not masquerade as empty indexes") }
+
 let progressLog = delegate.db.deletingLastPathComponent().appendingPathComponent("desktop-index.log")
 try "scanned=125 indexed=36 unchanged/skipped=89 errors=0\n".write(to: progressLog, atomically: true, encoding: .utf8)
 delegate.indexLogStartOffset = 0
@@ -102,8 +124,8 @@ UserDefaults.standard.set("watch", forKey: "indexMode")
 precondition(delegate.indexLogProgressSummary() == "Indexing · 125 scanned · 36 updated · 89 skipped · 0 errors", "detailed counts must stay available")
 delegate.updateMenuBarIndexProgress(running: true)
 precondition(delegate.statusItem.button?.isBordered == false, "the live index status should not add a bordered button bezel")
-precondition(delegate.indexRemainingLabel?.stringValue == "Indexing", "the primary line must describe live activity")
-precondition(delegate.indexRegisteredLabel?.stringValue == "125 scanned", "unknown totals must show scanned files without invented estimates")
+precondition(delegate.indexRemainingLabel?.stringValue == LF("{0} searchable", "3"), "the primary line must show all registered documents, not this scan's updated count")
+precondition(delegate.indexRegisteredLabel?.stringValue == LF("{0} scanned", "125"), "unknown totals must show scanned files without invented estimates")
 precondition(delegate.indexProgressBar?.isHidden == true && (delegate.indexProgressBar?.progress ?? -1) == 0, "hide progress until a completed scan provides a usable target")
 precondition(delegate.statusItem.button?.toolTip?.contains("Total unknown") == true)
 precondition(delegate.statusItem.button?.toolTip?.contains("25%") == true, "tooltip should explain the configured duty cycle")
@@ -113,10 +135,10 @@ for label in [delegate.indexRemainingLabel!, delegate.indexRegisteredLabel!] {
 }
 UserDefaults.standard.set(250, forKey: "indexProgressTarget")
 delegate.refreshMenuBarIndexProgress()
-precondition(delegate.indexRegisteredLabel?.stringValue == "125 scanned", "unscoped legacy totals must not become estimates")
+precondition(delegate.indexRegisteredLabel?.stringValue == LF("{0} scanned", "125"), "unscoped legacy totals must not become estimates")
 UserDefaults.standard.set(delegate.indexProgressScope, forKey: "indexProgressTargetScope")
 delegate.refreshMenuBarIndexProgress()
-precondition(delegate.indexRegisteredLabel?.stringValue == "~50% · ~125 left", "use the previous completed scan for an explicitly approximate percentage and remainder")
+precondition(delegate.indexRegisteredLabel?.stringValue == LF("{0} / ~{1} scanned", "125", "250"), "show scanned files and an explicitly approximate total")
 precondition(delegate.indexProgressBar?.progress == 0.5 && delegate.indexProgressBar?.isHidden == false)
 precondition(delegate.statusItem.button?.toolTip?.contains("previous completed scan") == true)
 let compactStatusWidth = delegate.statusItem.length
@@ -135,54 +157,57 @@ for label in [delegate.indexRemainingLabel!, delegate.indexRegisteredLabel!] {
     precondition(label.lineBreakMode == .byTruncatingTail && textColumn.width <= 80, "constrained labels must truncate inside their visible column")
     precondition(label.frame.height >= 10, "both lines must remain tall enough for their font")
 }
-precondition(delegate.statusItem.button?.toolTip?.contains("~987654320 left") == true, "full information must remain accessible when text is constrained")
+precondition(delegate.statusItem.button?.toolTip?.contains("987,654,321") == true, "full estimated total must remain accessible when text is constrained")
 
-func checkIndexStatus(_ line: String, primary: String = "Indexing", secondary: String) throws {
+func checkIndexStatus(_ line: String, secondary: String) throws {
     try (line + "\n").write(to: progressLog, atomically: true, encoding: .utf8)
     delegate.refreshMenuBarIndexProgress()
-    precondition(delegate.indexRemainingLabel?.stringValue == primary)
+    precondition(delegate.indexRemainingLabel?.stringValue == LF("{0} searchable", "3"))
     precondition(delegate.indexRegisteredLabel?.stringValue == secondary)
 }
 UserDefaults.standard.set(250, forKey: "indexProgressTarget")
-try checkIndexStatus("scanned=0 indexed=0 unchanged/skipped=0 errors=0", secondary: "~0% · ~250 left")
+try checkIndexStatus("scanned=0 indexed=0 unchanged/skipped=0 errors=0", secondary: LF("{0} / ~{1} scanned", "0", "250"))
 precondition(delegate.indexProgressBar?.progress == 0)
-try checkIndexStatus("scanned=250 indexed=0 unchanged/skipped=250 errors=0", secondary: "~99% · ~0 left")
+try checkIndexStatus("scanned=250 indexed=0 unchanged/skipped=250 errors=0", secondary: LF("{0} / ~{1} scanned", "250", "250"))
 precondition(delegate.indexProgressBar?.progress == 0.99, "reaching an estimated target must never claim completion")
-try checkIndexStatus("scanned=300 indexed=50 unchanged/skipped=250 errors=0", secondary: "~99% · ~0 left")
+try checkIndexStatus("scanned=300 indexed=50 unchanged/skipped=250 errors=0", secondary: LF("{0} / ~{1} scanned", "300", "250"))
 precondition(UserDefaults.standard.integer(forKey: "indexProgressTarget") == 250, "partial scans cannot update the completed target")
 try checkIndexStatus("scanned=125 indexed=35 unchanged/skipped=89 errors=1", secondary: "1 failed")
 precondition(delegate.statusItem.button?.toolTip?.contains("Failed files: 1") == true)
 precondition(delegate.indexingMenuItem?.title.contains("1 errors") == true)
-try checkIndexStatus("scan_complete=true scanned=125 indexed=36 unchanged/skipped=89 errors=0", primary: "Watching", secondary: "Up to date")
+try checkIndexStatus("scan_complete=true scanned=125 indexed=36 unchanged/skipped=89 errors=0", secondary: LF("{0} scanned", "125"))
 precondition(delegate.indexProgressBar?.progress == 1)
 precondition(UserDefaults.standard.integer(forKey: "indexProgressTarget") == 125, "a newer completed scan must replace even a larger old target")
-try checkIndexStatus("scan_complete=true scanned=125 indexed=35 unchanged/skipped=89 errors=1", primary: "Watching", secondary: "1 failed")
+try checkIndexStatus("scan_complete=true scanned=125 indexed=35 unchanged/skipped=89 errors=1", secondary: LF("{0} failed", "1"))
 precondition(delegate.statusItem.button?.toolTip?.contains("Up to date") == false && delegate.indexingMenuItem?.title.contains("Up to date") == false, "completion with failures must not claim up-to-date status")
 UserDefaults.standard.set("manual", forKey: "indexMode")
-try checkIndexStatus("scan_complete=true scanned=125 indexed=36 unchanged/skipped=89 errors=0", primary: "Indexed", secondary: "Complete")
+try checkIndexStatus("scan_complete=true scanned=125 indexed=36 unchanged/skipped=89 errors=0", secondary: LF("{0} scanned", "125"))
 UserDefaults.standard.set("watch", forKey: "indexMode")
-try checkIndexStatus("scan_complete=true scanned=0 indexed=0 unchanged/skipped=0 errors=0", primary: "Watching", secondary: "Up to date")
-try checkIndexStatus("scanned=0 indexed=0 unchanged/skipped=0 errors=0", secondary: "0 scanned")
+try checkIndexStatus("scan_complete=true scanned=0 indexed=0 unchanged/skipped=0 errors=0", secondary: LF("{0} scanned", "0"))
+try checkIndexStatus("scanned=0 indexed=0 unchanged/skipped=0 errors=0", secondary: LF("{0} scanned", "0"))
 precondition(delegate.indexProgressBar?.isHidden == true, "an empty completed scan provides no useful future denominator")
 UserDefaults.standard.set(250, forKey: "indexProgressTarget")
 let originalProgressFolder = delegate.folder
 delegate.folder = testRoot.appendingPathComponent("another-folder").path
-try checkIndexStatus("scanned=125 indexed=36 unchanged/skipped=89 errors=0", secondary: "125 scanned")
+try checkIndexStatus("scanned=125 indexed=36 unchanged/skipped=89 errors=0", secondary: LF("{0} scanned", "125"))
 precondition(delegate.indexProgressBar?.isHidden == true, "another folder cannot reuse the completed scan estimate")
 delegate.folder = originalProgressFolder
 let originalProgressTypes = delegate.indexTypes
 UserDefaults.standard.set(["text"], forKey: "indexTypes")
 delegate.refreshMenuBarIndexProgress()
-precondition(delegate.indexRegisteredLabel?.stringValue == "125 scanned", "changed file types invalidate the estimate")
+precondition(delegate.indexRegisteredLabel?.stringValue == LF("{0} scanned", "125"), "changed file types invalidate the estimate")
 UserDefaults.standard.set(originalProgressTypes, forKey: "indexTypes")
 let progressLogHandle = try FileHandle(forReadingFrom: progressLog)
 delegate.indexLogStartOffset = try progressLogHandle.seekToEnd()
 try progressLogHandle.close()
 delegate.refreshMenuBarIndexProgress()
-precondition(delegate.indexRemainingLabel?.stringValue == "Indexing" && delegate.indexRegisteredLabel?.stringValue == "Starting…", "old log entries must not imply the new scan is already watching")
+precondition(delegate.indexRemainingLabel?.stringValue == LF("{0} searchable", "3") && delegate.indexRegisteredLabel?.stringValue == L("Starting…"), "old log entries must not imply the new scan is already watching")
 precondition(delegate.indexProgressBar?.isHidden == true)
 delegate.indexLogStartOffset = 0
 delegate.updateMenuBarIndexProgress(running: false)
+precondition(delegate.indexStatusContainer != nil && delegate.indexRemainingLabel?.stringValue == LF("{0} searchable", "3"), "searchable count should remain visible after indexing stops")
+precondition(delegate.indexRegisteredLabel?.stringValue == LF("Last scan: {0}", "250"), "idle status should show the last scoped scan estimate")
+precondition(delegate.indexProgressBar?.isHidden == true, "idle status must not suggest indexing is running")
 for command in ["@settings", "@设置", "@設定"] {
     delegate.search.stringValue = command
     delegate.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
@@ -329,8 +354,42 @@ _ = try updater.run("/usr/bin/ditto", ["-c", "-k", "--keepParent", Bundle.main.b
 let entries = try updater.run("/usr/bin/unzip", ["-Z1", archive.path])
 precondition(AppRelease.validArchivePaths(entries))
 try? FileManager.default.removeItem(at: archive)
+
+// Finishing onboarding must install the CLI even with no agent skills selected.
+setup.step = 4; setup.render()
+setup.codex.state = .off; setup.claude.state = .off; setup.shared.state = .off
+setup.indexAfterSetup.state = .off
+UserDefaults.standard.removeObject(forKey: "onboardingCompleted")
+let blockedHome = testRoot.appendingPathComponent("home-is-a-file")
+try "file".write(to: blockedHome, atomically: true, encoding: .utf8)
+setup.cliInstallationHome = blockedHome
+setup.advance()
+precondition(!UserDefaults.standard.bool(forKey: "onboardingCompleted"), "a failed CLI installation must keep onboarding incomplete")
+precondition(setup.status.stringValue.contains("CLI 설치 실패"), "installation errors must be visible")
+
+let automaticHome = testRoot.appendingPathComponent("onboarding-home")
+let automaticCLI = automaticHome.appendingPathComponent(".cargo/bin/weft")
+try FileManager.default.createDirectory(at: automaticCLI.deletingLastPathComponent(), withIntermediateDirectories: true)
+try "previous CLI".write(to: automaticCLI, atomically: true, encoding: .utf8)
+setup.cliInstallationHome = automaticHome
+setup.advance()
+precondition(UserDefaults.standard.bool(forKey: "onboardingCompleted"), "Finishing setup must commit only after installing the CLI")
+precondition(FileManager.default.isExecutableFile(atPath: automaticCLI.path), "onboarding must install an executable CLI")
+let installed = Process(); installed.executableURL = automaticCLI; installed.arguments = ["--version"]
+installed.standardOutput = FileHandle.nullDevice; installed.standardError = FileHandle.nullDevice
+try installed.run(); installed.waitUntilExit(); precondition(installed.terminationStatus == 0)
+let cliArchive = automaticHome.appendingPathComponent(".local/share/myvec/cli-backups")
+let backupsBefore = try FileManager.default.contentsOfDirectory(at: cliArchive, includingPropertiesForKeys: nil)
+precondition(backupsBefore.count == 1, "an existing CLI must be backed up")
+let backedUpCLI = try String(contentsOf: backupsBefore[0], encoding: .utf8)
+precondition(backedUpCLI == "previous CLI", "the backup must retain the previous CLI")
+try setup.installCLI(in: automaticHome)
+let backupsAfter = try FileManager.default.contentsOfDirectory(at: cliArchive, includingPropertiesForKeys: nil)
+precondition(backupsAfter.count == 1, "reinstalling the same CLI must not add a backup")
+precondition(!FileManager.default.fileExists(atPath: automaticHome.appendingPathComponent(".agents/skills/weft-semantic-search").path), "CLI setup must not install optional agent skills")
+precondition(delegate.indexProcess == nil, "finishing onboarding must not start indexing without consent")
 UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier!)
-print("PASS: setup validation, no implicit indexing, live menu status + scoped estimates + failures + constrained width, centered compact file previews, isolated skill install + backups + CLI, retained results during refresh + cancelled queries, settings controls, release selection, archive paths")
+print("PASS: setup validation + automatic CLI install and rollback-safe failure, no implicit indexing, live menu status + scoped estimates + failures + constrained width, centered compact file previews, isolated skill install + backups + CLI, retained results during refresh + cancelled queries, settings controls, release selection, archive paths")
 SWIFT
 MARKDOWN_SOURCES=()
 while IFS= read -r -d '' source; do MARKDOWN_SOURCES+=("$source"); done < <(find "$ROOT/macos/Vendor/MarkdownEngine" -type f -name '*.swift' -print0)

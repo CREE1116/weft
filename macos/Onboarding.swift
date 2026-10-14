@@ -29,6 +29,8 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
     var validating = false
     var modelReady = false
     var errorMessage: String?
+    // Override in the isolated app smoke test; normal onboarding uses the user's home.
+    var cliInstallationHome = FileManager.default.homeDirectoryForCurrentUser
     var modelURL: URL {
         let root = ProcessInfo.processInfo.environment["XDG_CACHE_HOME"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache")
@@ -257,7 +259,7 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
             let install = NSButton(title: AppLanguage.localize("선택한 에이전트에 스킬 설치"), target: self, action: #selector(installSkill))
             install.bezelStyle = .rounded
             add(install)
-            add(note(L("설치는 이 버튼을 눌렀을 때만 진행됩니다. CLI와 검색 스킬을 설치하며 기존 파일은 백업합니다. 에이전트 설정을 새로 읽거나 재시작해야 스킬이 나타날 수 있습니다.")))
+            add(note(L("설정 완료를 누르면 CLI가 ~/.cargo/bin/weft에 자동 설치됩니다. 위 버튼은 선택한 에이전트에 검색 스킬을 설치합니다. 터미널에서 weft를 사용하려면 ~/.cargo/bin이 PATH에 있어야 합니다.")))
             add(indexAfterSetup)
             next.isEnabled = true
         }
@@ -275,6 +277,12 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
         if step < 4 { step += 1; render(); return }
         if indexAfterSetup.state == .on && !modelReady {
             status.stringValue = L("모델 준비 단계에서 검색 모델을 먼저 설치하세요.")
+            return
+        }
+        do { try installCLI(in: cliInstallationHome) }
+        catch {
+            errorMessage = LF("CLI 설치 실패: {0}", error.localizedDescription)
+            status.stringValue = errorMessage!
             return
         }
         UserDefaults.standard.set(true, forKey: "onboardingCompleted")
@@ -376,6 +384,29 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
         }
     }
     @objc func installSkill() { installSkillFiles(in: FileManager.default.homeDirectoryForCurrentUser) }
+    @discardableResult
+    func installCLI(in home: URL) throws -> URL {
+        let manager = FileManager.default
+        let cli = home.appendingPathComponent(".cargo/bin/weft")
+        try manager.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Reopening setup should not create a new backup for an identical binary.
+        if manager.fileExists(atPath: cli.path) && manager.contentsEqual(atPath: cli.path, andPath: appDelegate.engine.path) {
+            return cli
+        }
+        let temporary = cli.deletingLastPathComponent().appendingPathComponent(".weft-\(UUID().uuidString)")
+        try manager.copyItem(at: appDelegate.engine, to: temporary)
+        defer { try? manager.removeItem(at: temporary) }
+        if manager.fileExists(atPath: cli.path) {
+            let archive = home.appendingPathComponent(".local/share/myvec/cli-backups")
+            try manager.createDirectory(at: archive, withIntermediateDirectories: true)
+            try manager.copyItem(at: cli, to: archive.appendingPathComponent("weft-\(UUID().uuidString)"))
+            // Replace the inode so macOS keeps the copied binary's code signature.
+            _ = try manager.replaceItemAt(cli, withItemAt: temporary)
+        } else {
+            try manager.moveItem(at: temporary, to: cli)
+        }
+        return cli
+    }
     func installSkillFiles(in home: URL) {
         do {
             var targets: [URL] = []
@@ -383,15 +414,7 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
             if claude.state == .on { targets.append(home.appendingPathComponent(".claude/skills")) }
             if shared.state == .on { targets.append(home.appendingPathComponent(".agents/skills")) }
             guard !targets.isEmpty else { status.stringValue = L("설치할 에이전트를 하나 이상 선택하세요."); return }
-            let cli = home.appendingPathComponent(".cargo/bin/weft")
-            try FileManager.default.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let temporary = cli.deletingLastPathComponent().appendingPathComponent(".weft-\(UUID().uuidString)")
-            try FileManager.default.copyItem(at: appDelegate.engine, to: temporary)
-            if FileManager.default.fileExists(atPath: cli.path) {
-                let backup = cli.deletingLastPathComponent().appendingPathComponent("weft.backup-\(UUID().uuidString)")
-                try FileManager.default.copyItem(at: cli, to: backup)
-                _ = try FileManager.default.replaceItemAt(cli, withItemAt: temporary)
-            } else { try FileManager.default.moveItem(at: temporary, to: cli) }
+            try installCLI(in: home)
             let source = Bundle.main.resourceURL!.appendingPathComponent("weft-semantic-search")
             for target in targets {
                 try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)

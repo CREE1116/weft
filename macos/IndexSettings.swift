@@ -150,31 +150,15 @@ extension AppDelegate {
     func updateMenuBarIndexProgress(running: Bool) {
         indexingMenuItem?.isHidden = !running
         guard let button = statusItem?.button else { return }
+        if indexStatusContainer == nil { installIndexStatusView(on: button) }
+        indexingStatusTimer?.invalidate()
+        indexingStatusTimer = nil
         if running {
-            if indexStatusContainer == nil { installIndexStatusView(on: button) }
-            indexingStatusTimer?.invalidate()
             indexingStatusTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
                 self?.refreshMenuBarIndexProgress()
             }
-            refreshMenuBarIndexProgress()
-        } else {
-            indexingStatusTimer?.invalidate()
-            indexingStatusTimer = nil
-            indexStatusContainer?.removeFromSuperview()
-            indexStatusContainer = nil
-            indexProgressIcon = nil
-            indexRemainingLabel = nil
-            indexRegisteredLabel = nil
-            indexProgressBar = nil
-            indexStatusDetailsWidthConstraint = nil
-            indexStatusBarWidthConstraint = nil
-            statusItem.length = NSStatusItem.squareLength
-            button.isBordered = true
-            button.title = ""
-            button.image = WeftTheme.menuImage
-            button.image?.isTemplate = true
-            button.toolTip = L("Weft · 검색 및 설정")
         }
+        refreshMenuBarIndexProgress()
     }
     func installIndexStatusView(on button: NSStatusBarButton) {
         statusItem.length = 72
@@ -189,8 +173,8 @@ extension AppDelegate {
         icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
 
-        let remaining = NSTextField(labelWithString: "Indexing")
-        let registered = NSTextField(labelWithString: "Starting…")
+        let remaining = NSTextField(labelWithString: "0")
+        let registered = NSTextField(labelWithString: "…")
         for label in [remaining, registered] {
             label.font = .systemFont(ofSize: 10, weight: .medium)
             label.textColor = .labelColor
@@ -214,10 +198,19 @@ extension AppDelegate {
         let barWidth = bar.widthAnchor.constraint(equalToConstant: 18)
         barWidth.isActive = true
 
-        let iconDetails = NSStackView(views: [icon, bar])
-        iconDetails.orientation = .vertical
-        iconDetails.spacing = 1
-        iconDetails.alignment = .centerX
+        // The bar uses the glyph's lower padding without moving its center above the text.
+        let iconDetails = NSView()
+        iconDetails.translatesAutoresizingMaskIntoConstraints = false
+        iconDetails.addSubview(icon)
+        iconDetails.addSubview(bar)
+        NSLayoutConstraint.activate([
+            iconDetails.widthAnchor.constraint(equalToConstant: 18),
+            iconDetails.heightAnchor.constraint(equalToConstant: 22),
+            icon.centerXAnchor.constraint(equalTo: iconDetails.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: iconDetails.centerYAnchor),
+            bar.centerXAnchor.constraint(equalTo: iconDetails.centerXAnchor),
+            bar.bottomAnchor.constraint(equalTo: iconDetails.bottomAnchor)
+        ])
 
         let container = NSStackView(views: [iconDetails, details])
         container.orientation = .horizontal
@@ -248,11 +241,12 @@ extension AppDelegate {
         UserDefaults.standard.set(scope, forKey: "indexProgressTargetScope")
     }
     func refreshMenuBarIndexProgress(maximumWidth: CGFloat = 180) {
-        let fields = indexLogProgressFields()
+        let running = indexingStatusTimer != nil
+        let fields = running ? indexLogProgressFields() : nil
         let scanned = max(0, Int(fields?["scanned"] ?? "0") ?? 0)
         let target = UserDefaults.standard.stringArray(forKey: "indexProgressTargetScope") == indexProgressScope
             ? max(0, UserDefaults.standard.integer(forKey: "indexProgressTarget")) : 0
-        let complete = fields?["scan_complete"] == "true"
+        let complete = running && fields?["scan_complete"] == "true"
         let percent = target > 0 ? Int(min(99, Double(scanned) / Double(target) * 100)) : 0
         let progress: CGFloat = complete ? 1 : CGFloat(percent) / 100
         let added = max(0, Int(fields?["indexed"] ?? "0") ?? 0)
@@ -262,40 +256,64 @@ extension AppDelegate {
             saveIndexProgressTarget(fields, scope: indexProgressScope)
             UserDefaults.standard.set(added, forKey: "indexLastAddedCount")
         }
-        let primary = complete ? (indexMode == "watch" ? L("Watching") : L("Indexed")) : L("Indexing")
+        let primary: String
+        let primaryColor: NSColor
+        let indexedCount: Int?
+        switch Self.indexedDocumentCount(at: db) {
+        case .available(let count):
+            indexedCount = count
+            primary = LF("{0} searchable", count.formatted())
+            primaryColor = count > 0 ? .systemGreen : .secondaryLabelColor
+        case .missing:
+            indexedCount = nil
+            primary = L("Set up indexing")
+            primaryColor = .secondaryLabelColor
+        case .unavailable:
+            indexedCount = nil
+            primary = L("Index unavailable")
+            primaryColor = .systemRed
+        }
         let secondary: String
-        if errors > 0 {
+        if running && errors > 0 {
             secondary = LF("{0} failed", String(errors))
         } else if complete {
-            secondary = indexMode == "watch" ? L("Up to date") : L("Complete")
-        } else if fields != nil && target > 0 {
-            secondary = LF("~{0}% · ~{1} left", String(percent), String(max(0,target-scanned)))
-        } else if fields != nil {
-            secondary = LF("{0} scanned", String(scanned))
-        } else {
+            secondary = LF("{0} scanned", scanned.formatted())
+        } else if running && fields != nil && target > 0 {
+            secondary = LF("{0} / ~{1} scanned", scanned.formatted(), target.formatted())
+        } else if running && fields != nil {
+            secondary = LF("{0} scanned", scanned.formatted())
+        } else if running {
             secondary = L("Starting…")
+        } else if indexedCount != nil && target > 0 {
+            secondary = LF("Last scan: {0}", target.formatted())
+        } else if indexedCount != nil {
+            secondary = L("Ready to search")
+        } else {
+            secondary = L("Check index settings")
         }
-        indexRemainingLabel?.attributedStringValue = statusLine(title: primary, value: "", valueColor: .labelColor)
+        indexRemainingLabel?.attributedStringValue = statusLine(title: "", value: primary, valueColor: primaryColor)
         indexRegisteredLabel?.attributedStringValue = statusLine(title: "", value: secondary, valueColor: errors > 0 ? .systemRed : .labelColor)
         let contentWidth = ceil(max(
             indexRemainingLabel?.attributedStringValue.size().width ?? 0,
             indexRegisteredLabel?.attributedStringValue.size().width ?? 0,
             36
         )) + 4 // Reserve the text field's horizontal insets before truncating.
-        let detailsWidth = min(contentWidth, max(55, maximumWidth - 25))
+        let detailsWidth = min(contentWidth, max(55, min(180, maximumWidth) - 25))
         indexStatusDetailsWidthConstraint?.constant = detailsWidth
         statusItem.length = ceil(25 + detailsWidth)
         indexProgressBar?.progress = progress
-        indexProgressBar?.isHidden = fields == nil || (target == 0 && !complete)
+        indexProgressBar?.isHidden = !running || fields == nil || (target == 0 && !complete)
         indexProgressIcon?.image = WeftTheme.menuImage
         let summary = "\(primary) · \(secondary)"
         let counts = LF("{0} scanned · {1} updated · {2} skipped · {3} errors", String(scanned), String(added), String(skipped), String(errors))
         indexingMenuItem?.title = "\(summary) · \(counts)"
-        let progressHint = complete ? L("Scan complete.") : target > 0
+        let progressHint = !running ? L("Indexing is idle.") : complete ? L("Scan complete.") : target > 0
             ? LF("Percentage and files left are estimates from the previous completed scan of this folder and file types ({0} files); the total may change.", String(target))
             : L("Total unknown; showing files scanned so far.")
         let errorHint = errors > 0 ? "\n" + LF("Failed files: {0}; check the index log for details.", String(errors)) : ""
-        statusItem?.button?.toolTip = "Weft · \(summary)\n\(counts)\n\(progressHint)\(errorHint)\n" + LF("Configured indexing duty cycle: {0}%.", String(indexDuty))
+        let countDetail = indexedCount.map { LF("{0} files available to search.", $0.formatted()) } ?? primary
+        let scanDetail = running ? counts + "\n" : ""
+        statusItem?.button?.toolTip = "Weft · \(countDetail)\n\(secondary)\n\(scanDetail)\(progressHint)\(errorHint)\n" + LF("Configured indexing duty cycle: {0}%.", String(indexDuty))
     }
     func statusLine(title: String, value: String, valueColor: NSColor) -> NSAttributedString {
         let titleAttributes: [NSAttributedString.Key: Any] = [

@@ -1,4 +1,20 @@
 [
+  {"key":"{0} searchable","file":"macos/IndexSettings.swift","arguments":1},
+  {"key":"Set up indexing","file":"macos/IndexSettings.swift","arguments":0},
+  {"key":"Index unavailable","file":"macos/IndexSettings.swift","arguments":0},
+  {"key":"{0} / ~{1} scanned","file":"macos/IndexSettings.swift","arguments":2},
+  {"key":"Last scan: {0}","file":"macos/IndexSettings.swift","arguments":1},
+  {"key":"Ready to search","file":"macos/IndexSettings.swift","arguments":0},
+  {"key":"Check index settings","file":"macos/IndexSettings.swift","arguments":0},
+  {"key":"Indexing is idle.","file":"macos/IndexSettings.swift","arguments":0},
+  {"key":"{0} files available to search.","file":"macos/IndexSettings.swift","arguments":1},
+  {"key":"인덱스 확인 필요","file":"macos/Weft.swift","arguments":0},
+  {"key":"인덱스를 읽을 수 없습니다. 설정 → 인덱싱 또는 검색 오류 로그를 확인하세요.","file":"macos/Weft.swift","arguments":0},
+  {"key":"인덱싱 중…","file":"macos/Weft.swift","arguments":0},
+  {"key":"초기 인덱싱 중입니다. 첫 파일이 등록되면 검색할 수 있습니다.","file":"macos/Weft.swift","arguments":0},
+  {"key":"인덱스 준비 필요","file":"macos/Weft.swift","arguments":0},
+  {"key":"검색할 파일이 아직 없습니다. 메뉴 막대 → 설정 → 인덱싱에서 폴더를 추가하세요.","file":"macos/Weft.swift","arguments":0},
+  {"key":"일치하는 파일·폴더가 없습니다. 이름이나 검색 범위를 바꿔보세요.","file":"macos/Weft.swift","arguments":0},
   {
     "key": "파일명",
     "file": "macos/Weft.swift",
@@ -1960,9 +1976,14 @@
     "arguments": 0
   },
   {
-    "key": "설치는 이 버튼을 눌렀을 때만 진행됩니다. CLI와 검색 스킬을 설치하며 기존 파일은 백업합니다. 에이전트 설정을 새로 읽거나 재시작해야 스킬이 나타날 수 있습니다.",
+    "key": "설정 완료를 누르면 CLI가 ~/.cargo/bin/weft에 자동 설치됩니다. 위 버튼은 선택한 에이전트에 검색 스킬을 설치합니다. 터미널에서 weft를 사용하려면 ~/.cargo/bin이 PATH에 있어야 합니다.",
     "file": "macos/Onboarding.swift",
     "arguments": 0
+  },
+  {
+    "key": "CLI 설치 실패: {0}",
+    "file": "macos/Onboarding.swift",
+    "arguments": 1
   },
   {
     "key": "단축키를 입력하거나 Esc로 취소하세요.",
