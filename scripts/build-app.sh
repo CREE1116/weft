@@ -12,9 +12,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/macos/Weft.swift" "$STAGING/main.swift"
 MARKDOWN_SOURCES=()
 while IFS= read -r -d '' source; do MARKDOWN_SOURCES+=("$source"); done < <(find "$ROOT/macos/Vendor/MarkdownEngine" -type f -name '*.swift' -print0)
-swiftc -swift-version 5 -O -target "$(uname -m)-apple-macosx14.0" -framework Cocoa -framework Carbon -framework QuickLookUI -framework AVFoundation -framework SwiftUI \
-  "$STAGING/main.swift" "$ROOT/macos/VoiceCapture.swift" "$ROOT/macos/Notes.swift" "$ROOT/macos/Onboarding.swift" "$ROOT/macos/IndexSettings.swift" "$ROOT/macos/QuickLinks.swift" "$ROOT/macos/Updates.swift" "$ROOT/macos/Brand.swift" "$ROOT/macos/WindowMotion.swift" "${MARKDOWN_SOURCES[@]}" -o "$APP/Contents/MacOS/Weft"
+swiftc -swift-version 5 -O -target "$(uname -m)-apple-macosx14.0" -framework Cocoa -framework Carbon -framework QuickLookUI -framework QuickLookThumbnailing -framework AVFoundation -framework SwiftUI \
+  "$STAGING/main.swift" "$ROOT/macos/VoiceCapture.swift" "$ROOT/macos/Notes.swift" "$ROOT/macos/Onboarding.swift" "$ROOT/macos/IndexSettings.swift" "$ROOT/macos/QuickLinks.swift" "$ROOT/macos/Updates.swift" "$ROOT/macos/Brand.swift" "$ROOT/macos/WindowMotion.swift" "$ROOT/macos/FileThumbnailView.swift" "$ROOT/macos/AppLanguage.swift" "${MARKDOWN_SOURCES[@]}" -o "$APP/Contents/MacOS/Weft"
 cp "$ROOT/macos/Info.plist" "$APP/Contents/Info.plist"
+cp -R "$ROOT/macos/Resources/"*.lproj "$APP/Contents/Resources/"
 if [ -n "${WEFT_APP_VERSION:-}" ]; then
   VERSION="${WEFT_APP_VERSION#v}"
   if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then printf 'Invalid app release version\n' >&2; exit 1; fi

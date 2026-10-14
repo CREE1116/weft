@@ -1,0 +1,1 @@
+Payment processing trace for invoice INV-2041. Approval route K7Q2LM uses retryHandler. 공급업체 청구서 승인 절차와 데이터베이스 재시도 정책을 기록한다.

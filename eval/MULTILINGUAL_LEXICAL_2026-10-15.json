@@ -1,0 +1,77 @@
+{
+  "scope": "isolated exact/partial keyword smoke only; deterministic mock embeddings; does not measure semantic or per-language retrieval quality",
+  "cases": [
+    {
+      "language": "English",
+      "body": "Supplier invoice approval workflow",
+      "query": "invoice",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "French",
+      "body": "La procédure de résiliation du contrat",
+      "query": "résiliation",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "Spanish",
+      "body": "La aprobación de facturas del proveedor",
+      "query": "aprobación",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "German",
+      "body": "Die Vertragskündigung erfolgt schriftlich",
+      "query": "Vertragskündigung",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "Russian",
+      "body": "Порядок утверждения договора поставщика",
+      "query": "договора",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "Greek",
+      "body": "Η έγκριση του τιμολογίου απαιτεί έλεγχο",
+      "query": "τιμολογίου",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "Arabic",
+      "body": "إجراءات الموافقة على فاتورة المورد",
+      "query": "فاتورة",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "Hebrew",
+      "body": "נוהל אישור חשבונית ספק",
+      "query": "חשבונית",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "Japanese",
+      "body": "取引先の請求書承認手順を確認する",
+      "query": "請求書",
+      "lexical_expected_file_found": false
+    },
+    {
+      "language": "Chinese",
+      "body": "供应商发票审批流程需要经理确认",
+      "query": "发票",
+      "lexical_expected_file_found": false
+    },
+    {
+      "language": "Thai",
+      "body": "คู่มือการอนุมัติใบแจ้งหนี้สำหรับผู้ขาย",
+      "query": "ใบแจ้งหนี้",
+      "lexical_expected_file_found": true
+    },
+    {
+      "language": "Hindi",
+      "body": "विक्रेता के अनुबंध की स्वीकृति प्रक्रिया",
+      "query": "अनुबंध",
+      "lexical_expected_file_found": true
+    }
+  ]
+}

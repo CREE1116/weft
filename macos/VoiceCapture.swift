@@ -7,8 +7,8 @@ final class VoiceCapture {
         case invalidInput
         var errorDescription: String? {
             switch self {
-            case .permissionDenied: return "마이크 접근이 허용되지 않았습니다. 시스템 설정에서 Weft의 마이크 권한을 켜주세요."
-            case .invalidInput: return "마이크 입력을 사용할 수 없습니다."
+            case .permissionDenied: return L("마이크 접근이 허용되지 않았습니다. 시스템 설정에서 Weft의 마이크 권한을 켜주세요.")
+            case .invalidInput: return L("마이크 입력을 사용할 수 없습니다.")
             }
         }
     }

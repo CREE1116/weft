@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <defs>
     <linearGradient id="purple" x2="0" y2="1"><stop stop-color="#7d54d9"/><stop offset="1" stop-color="#6640ba"/></linearGradient>
-    <mask id="warp"><rect width="100" height="100" fill="white"/><circle cx="46.4" cy="52" r="5" fill="black"/><circle cx="72.5" cy="52" r="5" fill="black"/></mask>
-    <mask id="weft"><rect width="100" height="100" fill="white"/><circle cx="27.5" cy="52" r="6" fill="black"/><circle cx="53.6" cy="52" r="6" fill="black"/></mask>
+    <mask id="warp" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><rect width="100" height="100" fill="white"/><circle cx="46.4" cy="52" r="5" fill="black"/><circle cx="72.5" cy="52" r="5" fill="black"/></mask>
+    <mask id="weft" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><rect width="100" height="100" fill="white"/><circle cx="27.5" cy="52" r="6" fill="black"/><circle cx="53.6" cy="52" r="6" fill="black"/></mask>
   </defs>
   <rect x="7.5" y="7.5" width="113" height="113" rx="25" fill="url(#purple)"/>
   <g transform="translate(10.625 10.625) scale(1.0675)" fill="none" stroke-linecap="round" stroke-linejoin="round">

@@ -1,6 +1,7 @@
 import Cocoa
 import Carbon
 import QuickLookUI
+import QuickLookThumbnailing
 import QuartzCore
 
 struct Hit: Decodable {
@@ -103,10 +104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     var indexStatusDetailsWidthConstraint: NSLayoutConstraint?
     var indexStatusBarWidthConstraint: NSLayoutConstraint?
     let search = NSSearchField()
-    let mode = NSSegmentedControl(labels: ["파일명", "의미 검색"], trackingMode: .selectOne, target: nil, action: nil)
-    let modeBadge = NSButton(title: "파일명 ⇥", target: nil, action: nil)
+    let mode = NSSegmentedControl(labels: [L("파일명"), L("의미 검색")], trackingMode: .selectOne, target: nil, action: nil)
+    let modeBadge = NSButton(title: L("파일명 ⇥"), target: nil, action: nil)
     let recordingDot = NSView()
-    let recordingLabel = NSTextField(labelWithString: "녹음 중 · 00:00")
+    let recordingLabel = NSTextField(labelWithString: L("녹음 중 · 00:00"))
     let recordingStopButton = NSButton()
     let searchIconView = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)!)
     let voiceCapture = VoiceCapture()
@@ -133,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     var inspectorWork: DispatchWorkItem?
     var resultTrailing: NSLayoutConstraint!
     let table = ResultTable()
-    let hint = NSTextField(labelWithString: "검색할 파일명이나 폴더를 입력하세요")
+    let hint = NSTextField(labelWithString: L("검색할 파일명이나 폴더를 입력하세요"))
     var hits: [Hit] = []
     var refreshingResults = false
     var replacingResults = false
@@ -151,12 +152,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     var updater: AppUpdater?
     var hotKey: EventHotKeyRef?
     var hotKeyHandler: EventHandlerRef?
+    var languageObserver: NSObjectProtocol?
     var keyboardMonitor: Any?
     var folderPicker: NSOpenPanel?
     let agentCodex = NSButton(checkboxWithTitle: "Codex", target: nil, action: nil)
     let agentClaude = NSButton(checkboxWithTitle: "Claude Code", target: nil, action: nil)
-    let agentShared = NSButton(checkboxWithTitle: "공용 에이전트", target: nil, action: nil)
-    let agentStatus = NSTextField(wrappingLabelWithString: "설치할 에이전트를 선택하세요.")
+    let agentShared = NSButton(checkboxWithTitle: L("공용 에이전트"), target: nil, action: nil)
+    let agentStatus = NSTextField(wrappingLabelWithString: L("설치할 에이전트를 선택하세요."))
     var settingsWindow: NSWindow?
     var folderLabel: NSTextField?
     var indexingLabel: NSTextField?
@@ -186,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         applyAppearance()
         makePanel()
         makeMenu()
+        languageObserver = NotificationCenter.default.addObserver(forName: AppLanguage.languageChangedNotification, object: nil, queue: .main) { [weak self] _ in self?.refreshLanguage() }
         registerShortcut()
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
@@ -239,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             default: return event
             }
         }
-        if !UserDefaults.standard.bool(forKey: "onboardingCompleted") && !FileManager.default.fileExists(atPath: db.path) {
+        if UserDefaults.standard.string(forKey: "uiLanguage") == nil || (!UserDefaults.standard.bool(forKey: "onboardingCompleted") && !FileManager.default.fileExists(atPath: db.path)) {
             showOnboarding()
         } else if UserDefaults.standard.object(forKey: "showOnLaunch") as? Bool ?? true { showPanel() }
         resumeIndexing()
@@ -279,23 +282,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.title = ""
         statusItem.button?.imagePosition = .imageOnly
-        statusItem.button?.toolTip = "Weft · 검색 및 설정"
+        statusItem.button?.toolTip = L("Weft · 검색 및 설정")
         let menu = NSMenu()
-        menu.addItem(withTitle: "Weft 검색…   \(shortcutName)", action: #selector(showPanel), keyEquivalent: "")
-        let indexToggle = menu.addItem(withTitle: "인덱싱 감시 시작", action: #selector(toggleIndexing), keyEquivalent: "")
+        menu.addItem(withTitle: LF("Weft 검색…   {0}", String(describing: shortcutName)), action: #selector(showPanel), keyEquivalent: "")
+        let indexToggle = menu.addItem(withTitle: L("인덱싱 감시 시작"), action: #selector(toggleIndexing), keyEquivalent: "")
         indexToggleMenuItem = indexToggle
-        let progress = NSMenuItem(title: "인덱싱 진행 중…", action: nil, keyEquivalent: "")
+        let progress = NSMenuItem(title: L("인덱싱 진행 중…"), action: nil, keyEquivalent: "")
         progress.isEnabled = false
         progress.isHidden = true
         menu.addItem(progress)
         indexingMenuItem = progress
-        menu.addItem(withTitle: "설정…", action: #selector(showSettings), keyEquivalent: "")
-        menu.addItem(withTitle: "처음 사용 설정…", action: #selector(showOnboarding), keyEquivalent: "")
-        menu.addItem(withTitle: "새 메모…", action: #selector(createMemoFromMenu), keyEquivalent: "")
-        menu.addItem(withTitle: "검색 오류 로그 열기", action: #selector(openAppLog), keyEquivalent: "")
-        menu.addItem(withTitle: "인덱싱 로그 열기", action: #selector(openLog), keyEquivalent: "")
+        menu.addItem(withTitle: L("설정…"), action: #selector(showSettings), keyEquivalent: "")
+        menu.addItem(withTitle: L("처음 사용 설정…"), action: #selector(showOnboarding), keyEquivalent: "")
+        menu.addItem(withTitle: L("새 메모…"), action: #selector(createMemoFromMenu), keyEquivalent: "")
+        menu.addItem(withTitle: L("검색 오류 로그 열기"), action: #selector(openAppLog), keyEquivalent: "")
+        menu.addItem(withTitle: L("인덱싱 로그 열기"), action: #selector(openLog), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Weft 종료", action: #selector(quit), keyEquivalent: "q")
+        menu.addItem(withTitle: L("Weft 종료"), action: #selector(quit), keyEquivalent: "q")
         for item in menu.items { item.target = self }
         statusItem.menu = menu
         // Keep native edit/window shortcuts available in accessory windows,
@@ -303,26 +306,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let main = NSMenu()
         let applicationItem = NSMenuItem(title: "Weft", action: nil, keyEquivalent: "")
         let application = NSMenu(title: "Weft")
-        let settingsItem = application.addItem(withTitle: "설정…", action: #selector(showSettings), keyEquivalent: "")
+        let settingsItem = application.addItem(withTitle: L("설정…"), action: #selector(showSettings), keyEquivalent: "")
         settingsItem.target = self
-        let setupItem = application.addItem(withTitle: "처음 사용 설정…", action: #selector(showOnboarding), keyEquivalent: "")
+        let setupItem = application.addItem(withTitle: L("처음 사용 설정…"), action: #selector(showOnboarding), keyEquivalent: "")
         setupItem.target = self
         application.addItem(.separator())
-        let quitItem = application.addItem(withTitle: "Weft 종료", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = application.addItem(withTitle: L("Weft 종료"), action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         applicationItem.submenu = application
         main.addItem(applicationItem)
-        let editItem = NSMenuItem(title: "편집", action: nil, keyEquivalent: "")
-        let edit = NSMenu(title: "편집")
-        for (title, selector, key) in [("전체 선택", "selectAll:", "a"), ("복사", "copy:", "c"),
-            ("붙여넣기", "paste:", "v"), ("잘라내기", "cut:", "x"), ("실행 취소", "undo:", "z")] {
+        let editItem = NSMenuItem(title: L("편집"), action: nil, keyEquivalent: "")
+        let edit = NSMenu(title: L("편집"))
+        for (title, selector, key) in [(L("전체 선택"), "selectAll:", "a"), (L("복사"), "copy:", "c"),
+            (L("붙여넣기"), "paste:", "v"), (L("잘라내기"), "cut:", "x"), (L("실행 취소"), "undo:", "z")] {
             edit.addItem(withTitle: title, action: NSSelectorFromString(selector), keyEquivalent: key)
         }
         editItem.submenu = edit
         main.addItem(editItem)
-        let windowItem = NSMenuItem(title: "윈도우", action: nil, keyEquivalent: "")
-        let windows = NSMenu(title: "윈도우")
-        windows.addItem(withTitle: "창 닫기", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let windowItem = NSMenuItem(title: L("윈도우"), action: nil, keyEquivalent: "")
+        let windows = NSMenu(title: L("윈도우"))
+        windows.addItem(withTitle: L("창 닫기"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowItem.submenu = windows
         main.addItem(windowItem)
         NSApp.mainMenu = main
@@ -338,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return noErr
         }, 1, &type, pointer, &hotKeyHandler)
         if !bindShortcut(code: shortcutCode, modifiers: shortcutModifiers) {
-            hint.stringValue = "단축키를 사용할 수 없습니다. 설정에서 다른 조합을 지정하세요."
+            hint.stringValue = L("단축키를 사용할 수 없습니다. 설정에서 다른 조합을 지정하세요.")
         }
     }
 
@@ -361,14 +364,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if sender.window === settingsWindow { shortcutHelp = generalShortcutHelp }
         if let hotKey = hotKey { UnregisterEventHotKey(hotKey); self.hotKey = nil }
         recordingShortcut = true
-        shortcutButton?.title = "단축키를 누르세요…"
-        shortcutHelp?.stringValue = "⌘, ⌥, ⌃ 중 하나를 포함해 누르세요. Esc로 취소합니다."
+        shortcutButton?.title = L("단축키를 누르세요…")
+        shortcutHelp?.stringValue = L("⌘, ⌥, ⌃ 중 하나를 포함해 누르세요. Esc로 취소합니다.")
         if let recorder = sender as? ShortcutRecorderButton { recorder.appDelegate = self }
         guard let window = sender.window, window.makeFirstResponder(sender) else {
             recordingShortcut = false
             _ = bindShortcut(code: shortcutCode, modifiers: shortcutModifiers)
             shortcutButton?.title = shortcutName
-            shortcutHelp?.stringValue = "단축키 입력창에 포커스를 둘 수 없습니다. 다시 눌러 시도하세요."
+            shortcutHelp?.stringValue = L("단축키 입력창에 포커스를 둘 수 없습니다. 다시 눌러 시도하세요.")
             return
         }
     }
@@ -376,12 +379,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func captureShortcut(_ event: NSEvent) {
         if event.keyCode == 53 {
             cancelShortcutRecording()
-            shortcutHelp?.stringValue = "어느 앱에서든 검색창을 앞으로 띄웁니다."
+            shortcutHelp?.stringValue = L("어느 앱에서든 검색창을 앞으로 띄웁니다.")
             return
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard !flags.intersection([.command, .option, .control]).isEmpty else {
-            shortcutHelp?.stringValue = "⌘, ⌥, ⌃ 중 하나와 다른 키를 함께 누르세요."
+            shortcutHelp?.stringValue = L("⌘, ⌥, ⌃ 중 하나와 다른 키를 함께 누르세요.")
             return
         }
         var modifiers: UInt32 = 0
@@ -405,11 +408,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             UserDefaults.standard.set(Int(event.keyCode), forKey: "shortcutCode")
             UserDefaults.standard.set(Int(modifiers), forKey: "shortcutModifiers")
             UserDefaults.standard.set(name, forKey: "shortcutName")
-            shortcutHelp?.stringValue = "저장되었습니다. 어느 앱에서든 \(name)로 검색창을 열 수 있습니다."
-            statusItem.menu?.items.first?.title = "Weft 검색…   \(name)"
+            shortcutHelp?.stringValue = LF("저장되었습니다. 어느 앱에서든 {0}로 검색창을 열 수 있습니다.", String(describing: name))
+            statusItem.menu?.items.first?.title = LF("Weft 검색…   {0}", String(describing: name))
         } else {
             _ = bindShortcut(code: oldCode, modifiers: oldModifiers)
-            shortcutHelp?.stringValue = "이미 사용 중인 단축키입니다. 다른 조합을 지정하세요."
+            shortcutHelp?.stringValue = L("이미 사용 중인 단축키입니다. 다른 조합을 지정하세요.")
         }
         recordingShortcut = false
         shortcutButton?.title = shortcutName
@@ -462,7 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         panelBackground.layer?.cornerRadius = 18
         panelBackground.layer?.masksToBounds = true
         panel.contentView = panelBackground
-        search.placeholderString = "파일·폴더 검색"
+        search.placeholderString = L("파일·폴더 검색")
         search.font = .systemFont(ofSize: 23)
         search.isBezeled = false
         search.drawsBackground = false
@@ -479,7 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         recordingLabel.textColor = .labelColor
         recordingLabel.maximumNumberOfLines = 1
         recordingLabel.lineBreakMode = .byTruncatingTail
-        recordingStopButton.title = "완료"
+        recordingStopButton.title = L("완료")
         recordingStopButton.bezelStyle = .rounded
         recordingStopButton.controlSize = .small
         recordingStopButton.font = .systemFont(ofSize: 12, weight: .medium)
@@ -491,7 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         modeBadge.isBordered = false
         modeBadge.font = .systemFont(ofSize: 12, weight: .medium)
         modeBadge.contentTintColor = WeftTheme.accent
-        modeBadge.toolTip = "Tab으로 파일명 / 의미 검색 전환"
+        modeBadge.toolTip = L("Tab으로 파일명 / 의미 검색 전환")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
         table.headerView = nil
@@ -505,10 +508,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         table.contextMenu = { [weak self] row in
             guard let self = self, self.hits.indices.contains(row), !["command", "shortcut"].contains(self.hits[row].kind) else { return nil }
             let menu = NSMenu()
-            for (title, action) in [("Finder에서 보기", #selector(self.revealSelected)),
-                                    ("파일 열기", #selector(self.openClicked)),
-                                    ("큰 미리보기", #selector(self.previewSelected)),
-                                    ("경로 복사", #selector(self.copySelectedPath))] {
+            for (title, action) in [(L("Finder에서 보기"), #selector(self.revealSelected)),
+                                    (L("파일 열기"), #selector(self.openClicked)),
+                                    (L("큰 미리보기"), #selector(self.previewSelected)),
+                                    (L("경로 복사"), #selector(self.copySelectedPath))] {
                 let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
                 item.target = self
                 menu.addItem(item)
@@ -584,7 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             hits = []
             table.reloadData()
             resizePanel()
-            modeBadge.title = mode.selectedSegment == 0 ? "파일명 ⇥" : "의미 ⇥"
+            modeBadge.title = mode.selectedSegment == 0 ? L("파일명 ⇥") : L("의미 ⇥")
         }
         dismissPreview()
         onboarding?.window?.orderOut(nil)
@@ -611,7 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             self.presentingSearch = false
         }
         if !FileManager.default.fileExists(atPath: db.path) {
-            hint.stringValue = "아직 인덱스가 없습니다. 메뉴 막대 → 설정 → 인덱싱"
+            hint.stringValue = L("아직 인덱스가 없습니다. 메뉴 막대 → 설정 → 인덱싱")
         }
     }
 
@@ -663,7 +666,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         panel.level = .floating
         if !active {
             recordingLabel.toolTip = nil
-            recordingStopButton.title = "완료"
+            recordingStopButton.title = L("완료")
             recordingStopButton.action = #selector(stopVoiceRecording)
         }
     }
@@ -683,14 +686,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     @objc func beginVoiceRecording() {
         guard !waitingForVoiceResult, !voiceCapture.isRecording else { return }
-        recordingStopButton.title = "완료"
+        recordingStopButton.title = L("완료")
         recordingStopButton.action = #selector(stopVoiceRecording)
         recordingLabel.toolTip = nil
         if !FileManager.default.isExecutableFile(atPath: Bundle.main.resourceURL!.appendingPathComponent("weft-speech").path) {
             let alert = NSAlert()
-            alert.messageText = "음성 기능을 사용할 수 없습니다"
-            alert.informativeText = "현재 앱 빌드에 음성 처리 도구가 포함되어 있지 않습니다. 앱을 다시 빌드하거나 최신 버전을 설치해주세요."
-            alert.addButton(withTitle: "확인")
+            alert.messageText = L("음성 기능을 사용할 수 없습니다")
+            alert.informativeText = L("현재 앱 빌드에 음성 처리 도구가 포함되어 있지 않습니다. 앱을 다시 빌드하거나 최신 버전을 설치해주세요.")
+            alert.addButton(withTitle: L("확인"))
             alert.runModal()
             return
         }
@@ -723,7 +726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func updateVoiceClock() {
         guard let started = voiceStartedAt else { return }
         let seconds = Int(Date().timeIntervalSince(started))
-        recordingLabel.stringValue = String(format: "녹음 중 · %02d:%02d", seconds / 60, seconds % 60)
+        recordingLabel.stringValue = String(format: L("녹음 중 · %02d:%02d"), seconds / 60, seconds % 60)
     }
 
     @objc func stopVoiceRecording() {
@@ -746,7 +749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             && FileManager.default.fileExists(atPath: diarization.appendingPathComponent("model.onnx").path)
             && FileManager.default.fileExists(atPath: embedding.path)
         if ready { runSpeechEngine(audioURL, asr: asr, diarization: diarization, embedding: embedding); return }
-        recordingLabel.stringValue = "음성 모델 다운로드 중…"
+        recordingLabel.stringValue = L("음성 모델 다운로드 중…")
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let installer = Bundle.main.resourceURL!.appendingPathComponent("setup-speech.sh")
@@ -758,8 +761,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 let output = diagnostics.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 guard process.terminationStatus == 0 else {
-                    let detail = String(data: output, encoding: .utf8) ?? "모델 다운로드 실패"
-                    DispatchQueue.main.async { self.finishVoiceFailure("음성 모델을 내려받지 못했습니다.\n\(detail)") }
+                    let detail = String(data: output, encoding: .utf8) ?? L("모델 다운로드 실패")
+                    DispatchQueue.main.async { self.finishVoiceFailure(LF("음성 모델을 내려받지 못했습니다.\n{0}", String(describing: detail))) }
                     return
                 }
                 DispatchQueue.main.async { self.runSpeechEngine(audioURL, asr: asr, diarization: diarization, embedding: embedding) }
@@ -798,8 +801,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                       let text = json["text"] as? String, !text.isEmpty else {
                     let diagnostic = String(data: diagnosticData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let reason = process.terminationReason == .uncaughtSignal
-                        ? "음성 엔진이 신호 \(process.terminationStatus)로 종료됐습니다."
-                        : "음성 엔진이 종료 코드 \(process.terminationStatus)로 끝났습니다."
+                        ? LF("음성 엔진이 신호 {0}로 종료됐습니다.", String(describing: process.terminationStatus))
+                        : LF("음성 엔진이 종료 코드 {0}로 끝났습니다.", String(describing: process.terminationStatus))
                     throw NSError(domain: "WeftSpeech", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: diagnostic.isEmpty ? reason : diagnostic])
                 }
                 DispatchQueue.main.async { self?.saveVoiceNote(text: text, language: json["language"] as? String ?? "unknown", audioURL: audioURL) }
@@ -810,21 +813,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func saveVoiceNote(text: String, language: String, audioURL: URL) {
         let recordings = storageDirectory(for: 1)
         let transcripts = storageDirectory(for: 2)
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short)
-        let base = "음성 메모 \(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-").prefix(16))"
+        let stamp = uiDate(Date())
+        let base = LF("음성 메모 {0}", String(describing: ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-").prefix(16)))
         let note = transcripts.appendingPathComponent(base + ".md")
         let audio = recordings.appendingPathComponent(base + ".caf")
         do {
             try FileManager.default.createDirectory(at: recordings, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: transcripts, withIntermediateDirectories: true)
             try FileManager.default.moveItem(at: audioURL, to: audio)
-            try ("# \(stamp)\n\n- 언어: \(language)\n- 녹음 파일: `\(audio.path)`\n\n## 전사\n\n\(text)\n").write(to: note, atomically: true, encoding: .utf8)
+            try (LF("# {0}\n\n- 언어: {1}\n- 녹음 파일: `{2}`\n\n## 전사\n\n{3}\n", String(describing: stamp), String(describing: language), String(describing: audio.path), String(describing: text))).write(to: note, atomically: true, encoding: .utf8)
             waitingForVoiceResult = false
             setRecordingChrome(false)
             showPanel()
             search.stringValue = text
             controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
-            indexNoteFile(note, completionMessage: "음성 메모 저장 및 검색 인덱싱 완료")
+            indexNoteFile(note, completionMessage: L("음성 메모 저장 및 검색 인덱싱 완료"))
         } catch { try? FileManager.default.removeItem(at: audioURL); finishVoiceFailure(error.localizedDescription) }
     }
 
@@ -838,11 +841,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             try? log?.close()
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.hint.stringValue = process.terminationStatus == 0 ? completionMessage : "파일은 저장됐지만 인덱싱에 실패했습니다. 설정 → 로그를 확인하세요."
+                self.hint.stringValue = process.terminationStatus == 0 ? completionMessage : L("파일은 저장됐지만 인덱싱에 실패했습니다. 설정 → 로그를 확인하세요.")
             }
         }
         do { try process.run(); voiceIndexProcess = process }
-        catch { finishVoiceFailure("메모는 저장됐지만 인덱싱 시작에 실패했습니다: \(error.localizedDescription)") }
+        catch { finishVoiceFailure(LF("메모는 저장됐지만 인덱싱 시작에 실패했습니다: {0}", String(describing: error.localizedDescription))) }
     }
 
     func finishVoiceFailure(_ message: String) {
@@ -862,12 +865,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func showVoiceError(_ message: String, microphonePermission: Bool = false) {
-        let alert = NSAlert(); alert.messageText = "음성 메모 처리에 실패했습니다."
+        let alert = NSAlert(); alert.messageText = L("음성 메모 처리에 실패했습니다.")
         let firstLines = message.components(separatedBy: .newlines).prefix(2).joined(separator: "\n")
         let concise = String(firstLines.prefix(220))
-        alert.informativeText = message.count > concise.count ? concise + "…\n자세한 내용은 검색 오류 로그에서 확인하세요." : concise
-        alert.addButton(withTitle: "확인")
-        if microphonePermission { alert.addButton(withTitle: "시스템 설정 열기") }
+        alert.informativeText = message.count > concise.count ? concise + L("…\n자세한 내용은 검색 오류 로그에서 확인하세요.") : concise
+        alert.addButton(withTitle: L("확인"))
+        if microphonePermission { alert.addButton(withTitle: L("시스템 설정 열기")) }
         if microphonePermission, alert.runModal() == .alertSecondButtonReturn,
            let settings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
             NSWorkspace.shared.open(settings)
@@ -905,11 +908,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         resultHeight.constant = rows == 0 ? 0 : showDetails ? 440 : CGFloat(rows) * 56
         resultScroll.isHidden = rows == 0
         divider.isHidden = rows == 0
-        hint.isHidden = rows == 0
+        hint.isHidden = rows == 0 && search.stringValue.isEmpty
         inspector.isHidden = !showDetails
         resultTrailing.constant = showDetails ? -388 : -12
         let width: CGFloat = showDetails ? 1040 : 680
-        let height: CGFloat = rows == 0 ? 84 : 116 + resultHeight.constant
+        let height: CGFloat = rows == 0 ? (search.stringValue.isEmpty ? 84 : 116) : 116 + resultHeight.constant
         let target = NSRect(x: old.midX - width / 2, y: old.maxY - height, width: width, height: height)
         if target != old { panelMotion?.move(to: target, animated: animated) }
         if !showDetails { clearInspector() }
@@ -932,7 +935,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         inspectorContent.layer?.masksToBounds = true
         inspectorContent.layer?.borderWidth = 1
         inspectorContent.layer?.borderColor = NSColor.separatorColor.cgColor
-        let information = NSTextField(labelWithString: "정보")
+        let information = NSTextField(labelWithString: L("정보"))
         information.font = .systemFont(ofSize: 12, weight: .semibold)
         let rule = NSBox()
         rule.boxType = .separator
@@ -1014,19 +1017,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         inspectedHit = hit; inspectedStamp = stamp
         inspectorName.stringValue = url.lastPathComponent
         guard let values = resources else {
-            inspectorSubtitle.stringValue = "파일이 이동되었거나 삭제되었습니다."
-            addMetadata("위치", hit.path)
+            inspectorSubtitle.stringValue = L("파일이 이동되었거나 삭제되었습니다.")
+            addMetadata(L("위치"), hit.path)
             return
         }
         inspectorName.toolTip = url.lastPathComponent
-        let types = ["pdf": "PDF 문서", "docx": "Microsoft Word 문서", "doc": "Microsoft Word 문서",
-                     "pptx": "PowerPoint 프레젠테이션", "ppt": "PowerPoint 프레젠테이션",
-                     "xlsx": "Excel 통합 문서", "xls": "Excel 통합 문서",
-                     "png": "PNG 이미지", "jpg": "JPEG 이미지", "jpeg": "JPEG 이미지",
-                     "heic": "HEIC 이미지", "gif": "GIF 이미지", "webp": "WebP 이미지",
-                     "mp3": "MP3 오디오", "m4a": "M4A 오디오", "wav": "WAV 오디오", "flac": "FLAC 오디오",
-                     "mp4": "MPEG-4 동영상", "mov": "QuickTime 동영상", "mkv": "Matroska 동영상"]
-        var description = values.isDirectory == true ? "폴더" : types[url.pathExtension.lowercased()] ?? values.localizedTypeDescription ?? "파일"
+        let types = ["pdf": L("PDF 문서"), "docx": L("Microsoft Word 문서"), "doc": L("Microsoft Word 문서"),
+                     "pptx": L("PowerPoint 프레젠테이션"), "ppt": L("PowerPoint 프레젠테이션"),
+                     "xlsx": L("Excel 통합 문서"), "xls": L("Excel 통합 문서"),
+                     "png": L("PNG 이미지"), "jpg": L("JPEG 이미지"), "jpeg": L("JPEG 이미지"),
+                     "heic": L("HEIC 이미지"), "gif": L("GIF 이미지"), "webp": L("WebP 이미지"),
+                     "mp3": L("MP3 오디오"), "m4a": L("M4A 오디오"), "wav": L("WAV 오디오"), "flac": L("FLAC 오디오"),
+                     "mp4": L("MPEG-4 동영상"), "mov": L("QuickTime 동영상"), "mkv": L("Matroska 동영상")]
+        var description = values.isDirectory == true ? L("폴더") : types[url.pathExtension.lowercased()] ?? values.localizedTypeDescription ?? L("파일")
         if values.isDirectory != true, let size = values.fileSize {
             description += " · " + ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
         }
@@ -1035,13 +1038,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let dates = DateFormatter()
         dates.locale = Locale(identifier: "ko_KR")
         dates.dateFormat = "yyyy. M. d.  a h:mm"
-        if let date = values.creationDate { addMetadata("생성일", dates.string(from: date)) }
-        if let date = values.contentModificationDate { addMetadata("수정일", dates.string(from: date)) }
-        if hit.chunk_index != nil || hit.start_line > 0 { addMetadata("본문", "\(hit.start_line)–\(hit.end_line)줄") }
+        if let date = values.creationDate { addMetadata(L("생성일"), dates.string(from: date)) }
+        if let date = values.contentModificationDate { addMetadata(L("수정일"), dates.string(from: date)) }
+        if hit.chunk_index != nil || hit.start_line > 0 { addMetadata(L("본문"), LF("{0}–{1}줄", String(describing: hit.start_line), String(describing: hit.end_line))) }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let parent = url.deletingLastPathComponent().path
         let location = parent.hasPrefix(home + "/") ? "~" + parent.dropFirst(home.count) : parent
-        addMetadata("위치", location, tooltip: parent)
+        addMetadata(L("위치"), location, tooltip: parent)
         // A large file icon is the fallback while a native preview is preparing.
         inspectorIcon.image = NSWorkspace.shared.icon(forFile: hit.path)
         inspectorIcon.frame = inspectorContent.bounds.insetBy(dx: 110, dy: 40)
@@ -1062,6 +1065,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 scroll.documentView = text
                 self.inspectorIcon.removeFromSuperview()
                 self.inspectorContent.addSubview(scroll)
+            } else if values.isDirectory != true, ["pdf", "doc", "docx", "docm", "ppt", "pptx", "pptm", "xls", "xlsx", "xlsm", "odt", "ods", "odp", "pages", "key", "numbers"].contains(url.pathExtension.lowercased()) {
+                // Native thumbnails keep the full document page centered in the
+                // compact inspector; the large Quick Look window stays interactive.
+                let view = CenteredFilePreviewView(frame: self.inspectorContent.bounds, url: url, fallback: NSWorkspace.shared.icon(forFile: hit.path))
+                view.autoresizingMask = [.width, .height]
+                self.inspectorIcon.removeFromSuperview()
+                self.inspectorContent.addSubview(view)
             } else if values.isDirectory != true, let view = QLPreviewView(frame: self.inspectorContent.bounds, style: .normal) {
                 view.autoresizingMask = [.width, .height]
                 view.autostarts = false
@@ -1133,6 +1143,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc func openAppLog() {
         if FileManager.default.fileExists(atPath: appLogURL.path) { NSWorkspace.shared.open(appLogURL) }
     }
+    func uiDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: AppLanguage.current.rawValue)
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+    func refreshLanguage() {
+        mode.setLabel(L("파일명"), forSegment: 0)
+        mode.setLabel(L("의미 검색"), forSegment: 1)
+        search.placeholderString = mode.selectedSegment == 0 ? L("파일·폴더 검색") : L("내용으로 검색")
+        modeBadge.title = mode.selectedSegment == 0 ? L("파일명 ⇥") : L("의미 ⇥")
+        agentShared.title = L("공용 에이전트")
+        agentStatus.stringValue = L("설치할 에이전트를 선택하세요.")
+        hint.stringValue = L("검색할 파일명이나 폴더를 입력하세요")
+        let settingsWereVisible = settingsWindow?.isVisible == true
+        settingsWindow?.orderOut(nil)
+        settingsWindow = nil
+        if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
+        indexStatusContainer = nil
+        indexRemainingLabel = nil
+        indexRegisteredLabel = nil
+        indexProgressBar = nil
+        indexingStatusTimer?.invalidate()
+        makeMenu()
+        updateIndexControls()
+        table.reloadData()
+        inspectedHit = nil
+        updateInspector()
+        if settingsWereVisible { showSettings() }
+    }
+    @objc func languagePreferenceChanged(_ sender: NSPopUpButton) {
+        let languages = AppLanguage.allCases
+        guard languages.indices.contains(sender.indexOfSelectedItem) else { return }
+        AppLanguage.select(languages[sender.indexOfSelectedItem])
+    }
+
     @objc func showOnboarding() {
         hide()
         settingsWindow?.orderOut(nil)
@@ -1157,7 +1204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             try? log?.close()
         }
         do { try process.run(); daemonProcess = process }
-        catch { modeBadge.toolTip = "의미 검색 준비 실패: \(error.localizedDescription)" }
+        catch { modeBadge.toolTip = LF("의미 검색 준비 실패: {0}", String(describing: error.localizedDescription)) }
     }
     @objc func warmPreferenceChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "warmAtOpen")
@@ -1195,6 +1242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
             return prefix + ["q", expression + " level \(level) top 30", "--json"]
         }
+        if level == "file" && positives.count == 1 && negatives.isEmpty && operatorPreset() == nil {
+            return prefix + ["search", positives[0], "--mode", "hybrid", "--top", "30", "--json"]
+        }
         let combine = operatorPreset() == "@any" || separator == " | " ? "any" : separator == " & " ? "strict" : "all"
         var args = prefix + ["retrieve", positives[0], "--level", level, "--combine", combine,
             "--context-chars", level == "chunk" ? "6000" : "0", "--top", "30", "--json"]
@@ -1219,28 +1269,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc func quit() { dismissPreview(); NSApp.terminate(nil) }
     @objc func modeChanged() {
         cancelSearch()
-        modeBadge.title = mode.selectedSegment == 0 ? "파일명 ⇥" : "의미 ⇥"
-        search.placeholderString = mode.selectedSegment == 0 ? "파일·폴더 검색" : "내용으로 검색"
-        hint.stringValue = mode.selectedSegment == 0 ? "파일명 검색 · 바로 검색" : "입력하면 의미 검색 결과가 갱신됩니다"
+        modeBadge.title = mode.selectedSegment == 0 ? L("파일명 ⇥") : L("의미 ⇥")
+        search.placeholderString = mode.selectedSegment == 0 ? L("파일·폴더 검색") : L("내용으로 검색")
+        hint.stringValue = mode.selectedSegment == 0 ? L("파일명 검색 · 바로 검색") : L("입력하면 의미 검색 결과가 갱신됩니다")
         controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
         focusSearch()
     }
 
     func controlTextDidChange(_ notification: Notification) {
         cancelSearch()
-        let raw = search.stringValue
+        let input = search.stringValue
+        let aliases = ["@settings": "@설정", "@note": "@메모", "@record": "@녹음", "@设置": "@설정", "@設定": "@설정", "@笔记": "@메모", "@メモ": "@메모", "@录音": "@녹음", "@録音": "@녹음"]
+        let words = input.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        let canonical = words.first.flatMap { aliases[$0.lowercased()] }
+        let raw = canonical.map { $0 + (words.count > 1 ? " " + words[1] : "") } ?? input
         let value = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if value == "@설정" {
             applyResults([Hit(path: "@설정", kind: "command", score: 0, start_line: 0, end_line: 0)])
-            hint.stringValue = "Enter를 눌러 Weft 설정 열기"
-            modeBadge.title = "설정"
+            hint.stringValue = L("Enter를 눌러 Weft 설정 열기")
+            modeBadge.title = L("설정")
             refreshingResults = false
             return
         }
         if value == "@녹음" {
             applyResults([Hit(path: "@녹음", kind: "command", score: 0, start_line: 0, end_line: 0)])
-            hint.stringValue = "Enter를 눌러 녹음 시작 · 완료 후 전사문을 검색창에 입력합니다"
-            modeBadge.title = "음성 녹음"
+            hint.stringValue = L("Enter를 눌러 녹음 시작 · 완료 후 전사문을 검색창에 입력합니다")
+            modeBadge.title = L("음성 녹음")
             refreshingResults = false
             return
         }
@@ -1248,8 +1302,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let title = raw.count > 3 ? String(raw.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines) : ""
             let command = title.isEmpty ? "@메모" : "@메모 " + title
             applyResults([Hit(path: command, kind: "command", score: 0, start_line: 0, end_line: 0)])
-            hint.stringValue = "Enter를 눌러 마크다운 메모 작성 · 저장 후 검색 인덱스에 추가됩니다"
-            modeBadge.title = "새 메모"
+            hint.stringValue = L("Enter를 눌러 마크다운 메모 작성 · 저장 후 검색 인덱스에 추가됩니다")
+            modeBadge.title = L("새 메모")
             refreshingResults = false
             return
         }
@@ -1257,43 +1311,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let webQuery = String(raw.trimmingCharacters(in: .whitespacesAndNewlines).dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
             if webQuery.isEmpty {
                 applyResults([])
-                hint.stringValue = "@web 뒤에 검색어를 입력하세요"
+                hint.stringValue = L("@web 뒤에 검색어를 입력하세요")
             } else {
                 applyResults([Hit(path: "@web " + webQuery, kind: "command", score: 0, start_line: 0, end_line: 0)])
-                hint.stringValue = "웹 검색 · ↑↓ 선택 후 Enter · 입력 중에는 브라우저가 열리지 않습니다"
+                hint.stringValue = L("웹 검색 · ↑↓ 선택 후 Enter · 입력 중에는 브라우저가 열리지 않습니다")
             }
-            modeBadge.title = "웹 검색"
+            modeBadge.title = L("웹 검색")
             refreshingResults = false
             return
         }
         if value.hasPrefix("@") && !raw.contains(where: { $0.isWhitespace }) {
-            let commands = ["@file", "@folder", "@chunk", "@all", "@any", "@avoid", "@web", "@녹음", "@메모", "@설정"].filter { $0.hasPrefix(value) }.map {
+            let commands = ["@file", "@folder", "@chunk", "@all", "@any", "@avoid", "@web", "@녹음", "@메모", "@설정"].filter { command in
+                command.hasPrefix(value) || aliases.contains { $0.value == command && $0.key.hasPrefix(value) }
+            }.map {
                 Hit(path: $0, kind: "command", score: 0, start_line: 0, end_line: 0)
             }
             applyResults(commands)
-            hint.stringValue = "↑↓ 범위 선택 · Enter 적용 · Tab 검색 방식 전환"
+            hint.stringValue = L("↑↓ 범위 선택 · Enter 적용 · Tab 검색 방식 전환")
             return
         }
         if let quickLinks = quickLinkHits(for: raw) {
             applyResults(quickLinks)
             refreshingResults = false
-            modeBadge.title = "바로가기"
+            modeBadge.title = L("바로가기")
             if quickLinks.count == 1,
                let id = UUID(uuidString: quickLinks[0].path),
                let item = userShortcuts.first(where: { $0.id == id }) {
-                if item.kind == .app { hint.stringValue = "앱 실행 · Enter를 눌러 \(item.title) 열기" }
-                else if quickLinks[0].context != nil && item.target.contains("{query}") { hint.stringValue = "URL 검색 · Enter를 눌러 실행 · 검색어가 {query}에 들어갑니다" }
-                else { hint.stringValue = "URL 열기 · Enter를 눌러 \(item.title) 열기" }
+                if item.kind == .app { hint.stringValue = LF("앱 실행 · Enter를 눌러 {0} 열기", String(describing: item.title)) }
+                else if quickLinks[0].context != nil && item.target.contains("{query}") { hint.stringValue = L("URL 검색 · Enter를 눌러 실행 · 검색어가 {query}에 들어갑니다") }
+                else { hint.stringValue = LF("URL 열기 · Enter를 눌러 {0} 열기", String(describing: item.title)) }
             } else {
-                hint.stringValue = "↑↓ 선택 후 Enter 실행 · 설정 → 바로가기에서 추가"
+                hint.stringValue = L("↑↓ 선택 후 Enter 실행 · 설정 → 바로가기에서 추가")
             }
             return
         }
-        modeBadge.title = mode.selectedSegment == 0 ? "파일명 ⇥" : "의미 ⇥"
+        modeBadge.title = mode.selectedSegment == 0 ? L("파일명 ⇥") : L("의미 ⇥")
         guard !parsedQuery().text.isEmpty else { applyResults([]); return }
         refreshingResults = true
         if operatorPreset() != nil || ["all(", "any(", "avoid("].contains(where: { parsedQuery().text.hasPrefix($0) }) {
-            mode.selectedSegment = 1; modeBadge.title = "의미 ⇥"
+            mode.selectedSegment = 1; modeBadge.title = L("의미 ⇥")
         }
 
         let token = generation
@@ -1327,7 +1383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // Retain the previous hits but cap composition polling so search cannot
         // stay in the "composing" state forever.
         if (search.currentEditor() as? NSTextView)?.hasMarkedText() == true && !Self.jamoOnly(parsedQuery().text) && retry < 5 {
-            modeBadge.title = "글자 조합 중 · ⇥"
+            modeBadge.title = L("글자 조합 중 · ⇥")
             let token = generation
             let work = DispatchWorkItem { [weak self] in
                 guard let self = self, self.generation == token else { return }
@@ -1341,7 +1397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let query = parsedQuery()
         guard !query.text.isEmpty else { return }
         guard FileManager.default.fileExists(atPath: db.path) else {
-            hint.stringValue = "인덱스가 없습니다. 폴더 및 인덱싱 설정에서 먼저 시작하세요."
+            hint.stringValue = L("인덱스가 없습니다. 폴더 및 인덱싱 설정에서 먼저 시작하세요.")
             return
         }
         refreshingResults = true
@@ -1351,8 +1407,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let initials = mode.selectedSegment == 1 && Self.jamoOnly(query.text)
         let semantic = mode.selectedSegment == 1 && !initials
         if semantic {
-            guard let args = semanticArguments(text: query.text, level: query.level) else { refreshingResults = false; modeBadge.title = "검색식 작성 중 · ⇥"; modeBadge.toolTip = "연산자 다음 검색어나 닫는 괄호를 입력하세요."; return }
-            warmDaemon(force: true)
+            guard let args = semanticArguments(text: query.text, level: query.level) else { refreshingResults = false; modeBadge.title = L("검색식 작성 중 · ⇥"); modeBadge.toolTip = L("연산자 다음 검색어나 닫는 괄호를 입력하세요."); return }
+            // Hybrid first tries content identifiers without inference. A
+            // lexical miss requests a daemon through the existing retry path.
+            if !args.contains("search") || retry > 0 { warmDaemon(force: true) }
             process.arguments = args
         } else {
             process.arguments = ["--db", db.path, "locate", query.text, "--level", initials ? "file" : query.level, "--top", "30", "--json"]
@@ -1369,30 +1427,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             try? errorHandle?.close()
             try? FileManager.default.removeItem(at: errorURL)
             refreshingResults = false
-            modeBadge.title = "실행 실패 · ⇥"
+            modeBadge.title = L("실행 실패 · ⇥")
             modeBadge.toolTip = error.localizedDescription
             writeAppError("launch: " + error.localizedDescription)
             return
         }
         searchProcess = process
-        modeBadge.title = "검색 중…"
+        modeBadge.title = L("검색 중…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             try? errorHandle?.close()
             let errorText = (try? String(contentsOf: errorURL, encoding: .utf8)) ?? ""
             try? FileManager.default.removeItem(at: errorURL)
-            let results = semantic ? (try? JSONDecoder().decode(Retrieval.self, from: data).hits)
-                : (try? JSONDecoder().decode([Hit].self, from: data))
+            let results = (try? JSONDecoder().decode([Hit].self, from: data))
+                ?? (try? JSONDecoder().decode(Retrieval.self, from: data).hits)
             DispatchQueue.main.async {
                 guard let self = self, self.generation == token else { return }
                 self.searchProcess = nil
                 if process.terminationStatus != 0 || results == nil {
-                    let reason = errorText.isEmpty ? "검색 응답 오류 (종료 코드 \(process.terminationStatus))" : errorText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let reason = errorText.isEmpty ? LF("검색 응답 오류 (종료 코드 {0})", String(describing: process.terminationStatus)) : errorText.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.writeAppError(reason)
                     let transient = reason.contains("daemon unavailable") || reason.contains("database is locked") || reason.contains("database is busy")
                     if transient && retry == 0 {
-                        self.modeBadge.title = "다시 연결 중…"
+                        self.modeBadge.title = L("다시 연결 중…")
                         self.warmDaemon(force: semantic)
                         let work = DispatchWorkItem { [weak self] in
                             guard let self = self, self.generation == token else { return }
@@ -1403,18 +1461,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                         return
                     }
                     self.refreshingResults = false
-                    self.modeBadge.title = semantic && reason.contains("daemon") ? "준비 실패 · ⇥" : "검색 실패 · ⇥"
-                    self.modeBadge.toolTip = reason + "\n메뉴 막대 → 검색 오류 로그 열기"
+                    self.modeBadge.title = semantic && reason.contains("daemon") ? L("준비 실패 · ⇥") : L("검색 실패 · ⇥")
+                    self.modeBadge.toolTip = reason + L("\n메뉴 막대 → 검색 오류 로그 열기")
                     self.hint.stringValue = reason
                     return
                 }
                 self.refreshingResults = false
                 self.applyResults(results ?? [])
-                self.modeBadge.title = initials ? "초성 · ⇥" : self.mode.selectedSegment == 0 ? "파일명 ⇥" : "의미 ⇥"
-                if self.hits.isEmpty { self.modeBadge.title = process.terminationStatus == 0 ? "0개 · ⇥" : "오류 · ⇥" }
+                self.modeBadge.title = initials ? L("초성 · ⇥") : self.mode.selectedSegment == 0 ? L("파일명 ⇥") : L("의미 ⇥")
+                if self.hits.isEmpty { self.modeBadge.title = process.terminationStatus == 0 ? L("0개 · ⇥") : L("오류 · ⇥") }
                 self.hint.stringValue = process.terminationStatus == 0
-                    ? "\(self.hits.count)개 · ↑↓ 선택·미리보기 · ⏎ 열기 · ⌥⏎ Finder · ⌘Y 미리보기 · ⇥ 검색 방식"
-                    : "검색에 실패했습니다. 모델 파일과 인덱스 설정을 확인하세요."
+                    ? self.hits.isEmpty ? L("관련도가 충분한 결과가 없습니다. 검색어를 구체화하거나 Tab으로 파일명 검색을 사용하세요.") : LF("{0}개 · ↑↓ 선택·미리보기 · ⏎ 열기 · ⌥⏎ Finder · ⌘Y 미리보기 · ⇥ 검색 방식", String(describing: self.hits.count))
+                    : L("검색에 실패했습니다. 모델 파일과 인덱스 설정을 확인하세요.")
                 self.modeBadge.toolTip = self.hint.stringValue
             }
         }
@@ -1473,14 +1531,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let name = URL(fileURLWithPath: hit.path).lastPathComponent
         let isWebSearch = hit.kind == "command" && hit.path.lowercased().hasPrefix("@web ")
         let quickLink = hit.kind == "shortcut" ? userShortcuts.first { $0.id.uuidString == hit.path } : nil
-        let commands = ["@file": "파일 검색", "@folder": "폴더 검색", "@chunk": "본문 청크 검색", "@all": "여러 주제를 함께", "@any": "주제 중 하나라도", "@avoid": "피하고 싶은 주제", "@web": "웹 검색", "@녹음": "음성 메모 녹음", "@메모": "새 마크다운 메모", "@설정": "Weft 설정 열기"]
-        let description = ["@file": "@file 검색어 · ⌘1", "@folder": "@folder 검색어 · ⌘2", "@chunk": "@chunk 검색어 · ⌘3 · Tab으로 의미 검색", "@all": "@all 데이터베이스 + 재시도", "@any": "@any 여행 | 음식", "@avoid": "@avoid 여행 - 광고", "@web": "@web 검색어 · Enter를 눌러 기본 브라우저에서 검색", "@녹음": "Enter를 눌러 녹음 시작", "@메모": "Enter를 눌러 마크다운 메모 작성", "@설정": "Enter를 눌러 설정 창 열기"]
+        let commands = ["@file": L("파일 검색"), "@folder": L("폴더 검색"), "@chunk": L("본문 청크 검색"), "@all": L("여러 주제를 함께"), "@any": L("주제 중 하나라도"), "@avoid": L("피하고 싶은 주제"), "@web": L("웹 검색"), "@녹음": L("음성 메모 녹음"), "@메모": L("새 마크다운 메모"), "@설정": L("Weft 설정 열기")]
+        let description = ["@file": L("@file 검색어 · ⌘1"), "@folder": L("@folder 검색어 · ⌘2"), "@chunk": L("@chunk 검색어 · ⌘3 · Tab으로 의미 검색"), "@all": L("@all 데이터베이스 + 재시도"), "@any": L("@any 여행 | 음식"), "@avoid": L("@avoid 여행 - 광고"), "@web": L("@web 검색어 · Enter를 눌러 기본 브라우저에서 검색"), "@녹음": L("Enter를 눌러 녹음 시작"), "@메모": L("Enter를 눌러 마크다운 메모 작성"), "@설정": L("Enter를 눌러 설정 창 열기")]
         (cell.viewWithTag(1) as? NSTextField)?.stringValue = quickLink.map { $0.title + (hit.context.map { " · \($0)" } ?? "") }
-            ?? (isWebSearch ? "웹 검색: \(String(hit.path.dropFirst(5)))"
+            ?? (isWebSearch ? LF("웹 검색: {0}", String(describing: String(hit.path.dropFirst(5))))
             : hit.kind == "command" ? (commands[hit.path] ?? hit.path)
-            : hit.chunk_index != nil ? "\(name) · \(hit.start_line)–\(hit.end_line)줄" : name)
+            : hit.chunk_index != nil && hit.start_line > 0 && hit.end_line >= hit.start_line ? LF("{0} · {1}–{2}줄", String(describing: name), String(describing: hit.start_line), String(describing: hit.end_line)) : name)
         (cell.viewWithTag(2) as? NSTextField)?.stringValue = quickLink.map { "\($0.alias) · \($0.kind == .app ? "앱 열기" : "URL 열기")" }
-            ?? (isWebSearch ? "Enter를 눌러 기본 브라우저에서 검색"
+            ?? (isWebSearch ? L("Enter를 눌러 기본 브라우저에서 검색")
             : hit.kind == "command" ? (description[hit.path] ?? "")
             : hit.context?.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? hit.path)
         if let icon = cell.viewWithTag(3) as? NSImageView {
@@ -1537,14 +1595,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let url = URL(fileURLWithPath: hits[table.selectedRow].path)
         if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]); hide() }
         else if NSWorkspace.shared.open(url) { hide() }
-        else { hint.stringValue = "파일이 이동되었거나 삭제되었습니다. 인덱싱 상태를 확인하세요." }
+        else { hint.stringValue = L("파일이 이동되었거나 삭제되었습니다. 인덱싱 상태를 확인하세요.") }
     }
 
     func openWebSearch(_ query: String) {
         guard var components = URLComponents(string: "https://www.google.com/search") else { return }
         components.queryItems = [URLQueryItem(name: "q", value: query)]
         guard let url = components.url, NSWorkspace.shared.open(url) else {
-            hint.stringValue = "브라우저에서 웹 검색을 열지 못했습니다."
+            hint.stringValue = L("브라우저에서 웹 검색을 열지 못했습니다.")
             return
         }
         hide()
@@ -1562,7 +1620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 320),
             styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
-        window.title = "\(URL(fileURLWithPath: hit.path).lastPathComponent) · \(hit.start_line)–\(hit.end_line)줄"
+        window.title = LF("{0} · {1}–{2}줄", String(describing: URL(fileURLWithPath: hit.path).lastPathComponent), String(describing: hit.start_line), String(describing: hit.end_line))
         window.level = .floating
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -1585,7 +1643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func showFilePreview(_ hit: Hit) {
         let url = URL(fileURLWithPath: hit.path)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            hint.stringValue = "파일이 이동되었거나 삭제되어 미리볼 수 없습니다."
+            hint.stringValue = L("파일이 이동되었거나 삭제되어 미리볼 수 없습니다.")
             return
         }
         let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 760, height: 540),
@@ -1666,7 +1724,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if let window = settingsWindow { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil); return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 700),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Weft 설정"
+        window.title = L("Weft 설정")
         window.isReleasedWhenClosed = false
         window.delegate = self
         let tabs = NSTabViewController()
@@ -1675,74 +1733,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         record.appDelegate = self
         record.bezelStyle = .rounded
         record.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        record.toolTip = "클릭한 뒤 사용할 단축키를 누르세요"
-        let shortcutDescription = NSTextField(wrappingLabelWithString: "어느 앱에서든 검색창을 앞으로 띄웁니다. 버튼을 눌러 변경하세요.")
+        record.toolTip = L("클릭한 뒤 사용할 단축키를 누르세요")
+        let shortcutDescription = NSTextField(wrappingLabelWithString: L("어느 앱에서든 검색창을 앞으로 띄웁니다. 버튼을 눌러 변경하세요."))
         shortcutDescription.font = .systemFont(ofSize: 12)
         shortcutDescription.textColor = .secondaryLabelColor
         shortcutButton = record; shortcutHelp = shortcutDescription; generalShortcutHelp = shortcutDescription
         let appearance = NSPopUpButton()
-        appearance.addItems(withTitles: ["시스템 설정", "밝게", "어둡게"])
+        appearance.addItems(withTitles: [L("시스템 설정"), L("밝게"), L("어둡게")])
         appearance.selectItem(at: ["system", "light", "dark"].firstIndex(of: UserDefaults.standard.string(forKey: "appearance") ?? "system") ?? 0)
         appearance.target = self; appearance.action = #selector(appearanceChanged(_:))
-        let launch = NSButton(checkboxWithTitle: "앱을 열 때 검색창 표시", target: self, action: #selector(launchPreferenceChanged(_:)))
+        let launch = NSButton(checkboxWithTitle: L("앱을 열 때 검색창 표시"), target: self, action: #selector(launchPreferenceChanged(_:)))
         launch.state = (UserDefaults.standard.object(forKey: "showOnLaunch") as? Bool ?? true) ? .on : .off
-        let warm = NSButton(checkboxWithTitle: "검색창을 열 때 의미 검색 미리 준비", target: self, action: #selector(warmPreferenceChanged(_:)))
+        let warm = NSButton(checkboxWithTitle: L("검색창을 열 때 의미 검색 미리 준비"), target: self, action: #selector(warmPreferenceChanged(_:)))
         warm.state = (UserDefaults.standard.object(forKey: "warmAtOpen") as? Bool ?? true) ? .on : .off
-        let general = settingsPage(title: "일반", subtitle: "빠르게 열고, 필요한 순간에 검색하세요.", views: [
-            settingsRow("검색창 단축키", control: record), shortcutDescription,
-            settingsRow("화면 스타일", control: appearance), launch, warm
+        let language = NSPopUpButton()
+        language.addItems(withTitles: AppLanguage.allCases.map { $0.nativeName })
+        language.selectItem(at: AppLanguage.allCases.firstIndex(of: AppLanguage.current) ?? 0)
+        language.target = self; language.action = #selector(languagePreferenceChanged(_:))
+        let languageHelp = NSTextField(wrappingLabelWithString: L("설정 언어를 선택하세요. 변경 사항이 즉시 적용됩니다."))
+        languageHelp.font = .systemFont(ofSize: 12); languageHelp.textColor = .secondaryLabelColor
+        let general = settingsPage(title: L("일반"), subtitle: L("빠르게 열고, 필요한 순간에 검색하세요."), views: [
+            settingsRow(L("검색창 단축키"), control: record), shortcutDescription,
+            settingsRow(L("언어"), control: language), languageHelp,
+            settingsRow(L("화면 스타일"), control: appearance), launch, warm
         ])
         let generalTab = NSTabViewItem(viewController: general)
-        generalTab.label = "일반"
+        generalTab.label = L("일반")
         generalTab.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: nil)
         tabs.addTabViewItem(generalTab)
 
         let indexTab = NSTabViewItem(viewController: indexedFileSettings())
-        indexTab.label = "인덱싱"
+        indexTab.label = L("인덱싱")
         indexTab.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
         tabs.addTabViewItem(indexTab)
 
         let voiceTab = NSTabViewItem(viewController: memoAndVoiceSettings())
-        voiceTab.label = "음성·메모"
+        voiceTab.label = L("음성·메모")
         voiceTab.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
         tabs.addTabViewItem(voiceTab)
 
         let updatesTab = NSTabViewItem(viewController: updateSettings())
-        updatesTab.label = "업데이트"
+        updatesTab.label = L("업데이트")
         updatesTab.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
         tabs.addTabViewItem(updatesTab)
 
         let linksTab = NSTabViewItem(viewController: quickLinksSettings())
-        linksTab.label = "바로가기"
+        linksTab.label = L("바로가기")
         linksTab.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
         tabs.addTabViewItem(linksTab)
 
         let agentSettings = agentIntegrationSettings()
         let agentTab = NSTabViewItem(viewController: agentSettings)
-        agentTab.label = "에이전트"
+        agentTab.label = L("에이전트")
         agentTab.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
         tabs.addTabViewItem(agentTab)
 
         let help = usageSettings()
-        let helpTab = NSTabViewItem(viewController: help); helpTab.label = "사용법"
+        let helpTab = NSTabViewItem(viewController: help); helpTab.label = L("사용법")
         helpTab.image = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: nil)
         tabs.addTabViewItem(helpTab)
 
         let permissionsTab = NSTabViewItem(viewController: permissionSettings())
-        permissionsTab.label = "권한"
+        permissionsTab.label = L("권한")
         permissionsTab.image = NSImage(systemSymbolName: "lock.shield", accessibilityDescription: nil)
         tabs.addTabViewItem(permissionsTab)
 
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
-        let about = settingsPage(title: "Weft", subtitle: "가까이에 두는 로컬 파일 검색", views: [
-            NSTextField(labelWithString: "앱 버전 \(version)"),
-            NSTextField(wrappingLabelWithString: "사용 방법은 ‘사용법’ 탭에서 확인할 수 있습니다."),
-            settingsSection("앱 제거"),
-            NSTextField(wrappingLabelWithString: "Weft 앱, 로컬 인덱스, 설치된 CLI를 휴지통으로 이동합니다. 메모·녹음과 에이전트 스킬은 보존됩니다."),
+        let about = settingsPage(title: "Weft", subtitle: L("가까이에 두는 로컬 파일 검색"), views: [
+            NSTextField(labelWithString: LF("앱 버전 {0}", String(describing: version))),
+            NSTextField(wrappingLabelWithString: L("사용 방법은 ‘사용법’ 탭에서 확인할 수 있습니다.")),
+            settingsSection(L("앱 제거")),
+            NSTextField(wrappingLabelWithString: L("Weft 앱, 로컬 인덱스, 설치된 CLI를 휴지통으로 이동합니다. 메모·녹음과 에이전트 스킬은 보존됩니다.")),
             uninstallButton()
         ])
         let aboutTab = NSTabViewItem(viewController: about)
-        aboutTab.label = "정보"
+        aboutTab.label = L("정보")
         aboutTab.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
         tabs.addTabViewItem(aboutTab)
         window.contentViewController = tabs
@@ -1764,13 +1829,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc func chooseFolder() { presentFolderPicker() }
 
     func presentFolderPicker(completion: (() -> Void)? = nil) {
-        guard indexProcess?.isRunning != true else { indexingLabel?.stringValue = "감시를 중지한 뒤 폴더를 변경하세요."; return }
+        guard indexProcess?.isRunning != true else { indexingLabel?.stringValue = L("감시를 중지한 뒤 폴더를 변경하세요."); return }
         guard folderPicker == nil else { return }
         cancelShortcutRecording()
         let picker = NSOpenPanel()
         folderPicker = picker
-        picker.title = "검색할 폴더 선택"
-        picker.prompt = "선택"
+        picker.title = L("검색할 폴더 선택")
+        picker.prompt = L("선택")
         picker.canChooseDirectories = true; picker.canChooseFiles = false
         picker.allowsMultipleSelection = false; picker.canCreateDirectories = false
         picker.resolvesAliases = true
@@ -1795,7 +1860,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc func openLog() {
         let log = db.deletingLastPathComponent().appendingPathComponent("desktop-index.log")
         if FileManager.default.fileExists(atPath: log.path) { NSWorkspace.shared.open(log) }
-        else { showSettings(); indexingLabel?.stringValue = "아직 인덱싱 로그가 없습니다." }
+        else { showSettings(); indexingLabel?.stringValue = L("아직 인덱싱 로그가 없습니다.") }
     }
 
     @objc func toggleIndexing() {
@@ -1807,7 +1872,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
             return
         }
-        guard !indexTypes.isEmpty else { indexingLabel?.stringValue = "파일 형식을 하나 이상 선택하세요."; return }
+        guard !indexTypes.isEmpty else { indexingLabel?.stringValue = L("파일 형식을 하나 이상 선택하세요."); return }
         if indexMode != "manual" { UserDefaults.standard.set(true, forKey: "indexingEnabled") }
         if indexMode == "interval" { scheduleIndexing() }
         startIndexing(watch: indexMode == "watch")

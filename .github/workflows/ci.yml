@@ -18,5 +18,9 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+      - if: runner.os == 'macOS'
+        run: python3 scripts/check-localizations.py
       - run: cargo test --locked ${{ matrix.features }}
+      - run: cargo build --locked ${{ matrix.features }}
+      - run: python3 eval/verify_hybrid.py --binary target/debug/weft
       - run: python3 eval/verify_bootstrap.py

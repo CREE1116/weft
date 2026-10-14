@@ -1,21 +1,29 @@
 import Cocoa
 
+private final class OnboardingDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 /// First-run setup stays separate from the search panel and never scans without opting in.
 final class OnboardingController: NSWindowController, URLSessionDownloadDelegate {
     unowned let appDelegate: AppDelegate
     var step = 0
+    var pendingLanguage = AppLanguage.current
     let body = NSStackView()
+    let breadcrumb = NSTextField(labelWithString: "")
     let titleLabel = NSTextField(labelWithString: "")
     let subtitle = NSTextField(wrappingLabelWithString: "")
     let status = NSTextField(wrappingLabelWithString: "")
     let progress = NSProgressIndicator()
-    let next = NSButton(title: "다음", target: nil, action: nil)
-    let back = NSButton(title: "이전", target: nil, action: nil)
+    let next = NSButton(title: AppLanguage.localize("다음"), target: nil, action: nil)
+    let back = NSButton(title: AppLanguage.localize("이전"), target: nil, action: nil)
+    let later = NSButton(title: AppLanguage.localize("나중에"), target: nil, action: nil)
     let folderLabel = NSTextField(wrappingLabelWithString: "")
     let codex = NSButton(checkboxWithTitle: "Codex", target: nil, action: nil)
     let claude = NSButton(checkboxWithTitle: "Claude Code", target: nil, action: nil)
-    let shared = NSButton(checkboxWithTitle: "공용 에이전트 스킬 폴더", target: nil, action: nil)
-    let indexAfterSetup = NSButton(checkboxWithTitle: "완료 후 선택한 폴더 인덱싱 및 변경 감시 시작", target: nil, action: nil)
+    let shared = NSButton(checkboxWithTitle: AppLanguage.localize("공용 에이전트 스킬 폴더"), target: nil, action: nil)
+    let indexAfterSetup = NSButton(checkboxWithTitle: AppLanguage.localize("완료 후 선택한 폴더 인덱싱 및 변경 감시 시작"), target: nil, action: nil)
+    private var languageObserver: NSObjectProtocol?
     var session: URLSession?
     var download: URLSessionDownloadTask?
     var validating = false
@@ -29,114 +37,244 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
 
     init(app: AppDelegate) {
         appDelegate = app
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 460),
-            styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Weft 시작하기"
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = AppLanguage.localize("Weft 시작하기")
+        window.contentMinSize = NSSize(width: 680, height: 520)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = app
-        titleLabel.font = .systemFont(ofSize: 25, weight: .semibold)
+        let content = window.contentView!
+        let logo = NSImageView(image: WeftTheme.menuImage)
+        logo.contentTintColor = WeftTheme.accent
+        logo.imageScaling = .scaleProportionallyUpOrDown
+        logo.setAccessibilityLabel("Weft")
+        let brand = NSTextField(labelWithString: "Weft")
+        brand.font = .systemFont(ofSize: 18, weight: .semibold)
+        let header = NSStackView(views: [logo, brand])
+        header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 10
+        breadcrumb.font = .systemFont(ofSize: 12)
+        breadcrumb.textColor = .secondaryLabelColor
+        breadcrumb.lineBreakMode = .byTruncatingTail
+        titleLabel.font = .systemFont(ofSize: 27, weight: .semibold)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitle.font = .systemFont(ofSize: 13)
         subtitle.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: 12)
         status.textColor = .secondaryLabelColor
         body.orientation = .vertical
         body.alignment = .leading
-        body.spacing = 16
+        body.spacing = 18
         next.target = self; next.action = #selector(advance)
         next.keyEquivalent = "\r"
         WeftTheme.primary(next)
         back.target = self; back.action = #selector(previous)
-        let later = NSButton(title: "나중에", target: self, action: #selector(deferSetup))
-        let actions = NSStackView(views: [later, back, next])
-        actions.spacing = 12
-        for view in [titleLabel, subtitle, body, status, actions] as [NSView] {
+        later.target = self; later.action = #selector(deferSetup)
+        for button in [back, later] { button.bezelStyle = .rounded }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let actions = NSStackView(views: [later, spacer, back, next])
+        actions.orientation = .horizontal; actions.spacing = 12; actions.alignment = .centerY
+        // A scrollable content area keeps longer translations usable at the minimum window size.
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        let document = OnboardingDocumentView()
+        scroll.documentView = document
+        document.translatesAutoresizingMaskIntoConstraints = false
+        body.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(body)
+        for view in [header, breadcrumb, titleLabel, subtitle, scroll, status, actions] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
-            window.contentView!.addSubview(view)
+            content.addSubview(view)
         }
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 32),
-            titleLabel.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 28),
-            subtitle.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitle.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -32),
-            subtitle.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            body.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            body.trailingAnchor.constraint(equalTo: subtitle.trailingAnchor),
-            body.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 26),
-            status.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            status.trailingAnchor.constraint(equalTo: subtitle.trailingAnchor),
-            status.bottomAnchor.constraint(equalTo: actions.topAnchor, constant: -20),
-            actions.trailingAnchor.constraint(equalTo: subtitle.trailingAnchor),
-            actions.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -24)
+            logo.widthAnchor.constraint(equalToConstant: 32),
+            logo.heightAnchor.constraint(equalToConstant: 32),
+            header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 36),
+            header.topAnchor.constraint(equalTo: content.topAnchor, constant: 22),
+            breadcrumb.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            breadcrumb.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -36),
+            breadcrumb.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
+            titleLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: breadcrumb.trailingAnchor),
+            titleLabel.topAnchor.constraint(equalTo: breadcrumb.bottomAnchor, constant: 20),
+            subtitle.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: breadcrumb.trailingAnchor),
+            subtitle.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
+            scroll.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: breadcrumb.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 24),
+            scroll.bottomAnchor.constraint(equalTo: status.topAnchor, constant: -18),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            body.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            body.topAnchor.constraint(equalTo: document.topAnchor),
+            body.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+            status.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            status.trailingAnchor.constraint(equalTo: breadcrumb.trailingAnchor),
+            status.bottomAnchor.constraint(equalTo: actions.topAnchor, constant: -18),
+            actions.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            actions.trailingAnchor.constraint(equalTo: breadcrumb.trailingAnchor),
+            actions.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
+            next.widthAnchor.constraint(greaterThanOrEqualToConstant: 100)
         ])
         shared.state = .on
-        progress.widthAnchor.constraint(equalToConstant: 540).isActive = true
+        languageObserver = NotificationCenter.default.addObserver(forName: AppLanguage.languageChangedNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else { return }
+                self.pendingLanguage = AppLanguage.current
+                self.render()
+            }
         render()
         window.center()
         validateCachedModel()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit { if let languageObserver = languageObserver { NotificationCenter.default.removeObserver(languageObserver) } }
 
-    func add(_ view: NSView) { body.addArrangedSubview(view) }
+    // Preview a first-page selection without committing preferences before Next.
+    private func L(_ key: String) -> String {
+        AppLanguage.localize(key, language: step == 0 ? pendingLanguage : AppLanguage.current)
+    }
+    private func LF(_ key: String, _ arguments: String...) -> String {
+        formatLocalizedTemplate(L(key), arguments: arguments)
+    }
+    func add(_ view: NSView) {
+        body.addArrangedSubview(view)
+        if view is NSTextField || view is NSStackView || view === progress {
+            view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        }
+    }
+    private func note(_ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
     func render() {
         appDelegate.cancelShortcutRecording()
         body.arrangedSubviews.forEach { body.removeArrangedSubview($0); $0.removeFromSuperview() }
+        window?.title = L("Weft 시작하기")
         back.isEnabled = step > 0
-        next.title = step == 3 ? "설정 완료" : "다음"
-        status.stringValue = errorMessage ?? "\(step + 1) / 4 · 메뉴 막대에서 언제든 다시 설정할 수 있습니다."
+        back.isHidden = step == 0
+        back.title = L("이전")
+        later.title = L("나중에")
+        next.title = step == 4 ? L("설정 완료") : L("다음")
+        shared.title = L("공용 에이전트 스킬 폴더")
+        indexAfterSetup.title = L("완료 후 선택한 폴더 인덱싱 및 변경 감시 시작")
+        let steps = [L("언어"), L("모델"), L("폴더"), L("단축키"), L("에이전트")]
+        let trail = NSMutableAttributedString()
+        for (index, name) in steps.enumerated() {
+            if index > 0 { trail.append(NSAttributedString(string: "   ›   ", attributes: [.foregroundColor: NSColor.tertiaryLabelColor])) }
+            trail.append(NSAttributedString(string: name, attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: index == step ? .semibold : .regular),
+                .foregroundColor: index == step ? WeftTheme.accent : NSColor.secondaryLabelColor
+            ]))
+        }
+        breadcrumb.attributedStringValue = trail
+        status.stringValue = step == 0 ? LF("{0} / 5 · 메뉴 막대에서 언제든 다시 설정할 수 있습니다.", String(step + 1))
+            : errorMessage ?? LF("{0} / 5 · 메뉴 막대에서 언제든 다시 설정할 수 있습니다.", String(step + 1))
         switch step {
         case 0:
-            titleLabel.stringValue = "검색 모델 준비"
-            subtitle.stringValue = "EmbeddingGemma 2 · 약 300 MB · 다운로드 후에는 Mac에서 로컬로 검색합니다."
-            add(NSTextField(wrappingLabelWithString: "문서 내용으로 검색하기 위해 모델이 필요합니다. 이미 설치된 모델은 확인 후 재사용합니다."))
-            let button = NSButton(title: modelReady ? "모델 준비 완료" : download != nil ? "다운로드 취소" : "모델 다운로드", target: self, action: #selector(downloadModel))
+            titleLabel.stringValue = L("Weft에 오신 것을 환영합니다")
+            subtitle.stringValue = L("먼저 사용할 언어를 선택하세요. 설정에서 언제든 바꿀 수 있습니다.")
+            let cards = AppLanguage.allCases.enumerated().map { index, language -> NSButton in
+                let button = NSButton(title: language.nativeName, target: self, action: #selector(chooseLanguage(_:)))
+                button.tag = index
+                button.setButtonType(.pushOnPushOff)
+                button.bezelStyle = .regularSquare
+                button.controlSize = .large
+                button.font = .systemFont(ofSize: 17, weight: .medium)
+                button.state = pendingLanguage == language ? .on : .off
+                button.image = NSImage(systemSymbolName: pendingLanguage == language ? "checkmark.circle.fill" : "circle",
+                    accessibilityDescription: nil)
+                button.imagePosition = .imageLeading
+                button.contentTintColor = pendingLanguage == language ? WeftTheme.accent : .labelColor
+                button.setAccessibilityLabel(language.nativeName)
+                button.heightAnchor.constraint(equalToConstant: 64).isActive = true
+                return button
+            }
+            let rows = stride(from: 0, to: cards.count, by: 2).map { start -> NSStackView in
+                let row = NSStackView(views: Array(cards[start..<min(start + 2, cards.count)]))
+                row.orientation = .horizontal; row.distribution = .fillEqually; row.spacing = 14
+                return row
+            }
+            let grid = NSStackView(views: rows)
+            grid.orientation = .vertical; grid.alignment = .leading; grid.spacing = 14
+            for row in rows { row.widthAnchor.constraint(equalTo: grid.widthAnchor).isActive = true }
+            add(grid)
+            add(note(L("내 Mac의 파일을 한곳에서 찾으세요. 모델과 폴더를 준비하는 데 몇 단계면 충분합니다.")))
+            next.isEnabled = true
+        case 1:
+            titleLabel.stringValue = L("검색 모델 준비")
+            subtitle.stringValue = L("EmbeddingGemma 2 · 약 300 MB · 다운로드 후에는 Mac에서 로컬로 검색합니다.")
+            add(note(L("문서 내용으로 검색하기 위해 모델이 필요합니다. 이미 설치된 모델은 확인 후 재사용합니다.")))
+            let button = NSButton(title: modelReady ? AppLanguage.localize("모델 준비 완료") : download != nil ? L("다운로드 취소") : L("모델 다운로드"), target: self, action: #selector(downloadModel))
+            button.bezelStyle = .rounded
             button.isEnabled = !modelReady && !validating
             add(button)
             progress.style = .bar
-            progress.isIndeterminate = validating
+            progress.isIndeterminate = validating || (download != nil && progress.doubleValue == 0)
             progress.minValue = 0; progress.maxValue = 100
             add(progress)
-            if validating { progress.startAnimation(nil); status.stringValue = "모델 파일 확인 중…" }
-            else { progress.stopAnimation(nil) }
+            if validating { progress.startAnimation(nil); status.stringValue = L("모델 파일 확인 중…") }
+            else if download != nil {
+                if progress.isIndeterminate { progress.startAnimation(nil) }
+                status.stringValue = L("모델 다운로드 중…")
+            } else { progress.stopAnimation(nil) }
             next.isEnabled = modelReady
-        case 1:
-            titleLabel.stringValue = "어디에서 찾을까요?"
-            subtitle.stringValue = "선택한 폴더를 검색 대상으로 사용하고, 이후 파일 변경도 감시합니다."
-            folderLabel.stringValue = appDelegate.folder.isEmpty ? "아직 폴더를 선택하지 않았습니다." : appDelegate.folder
-            folderLabel.maximumNumberOfLines = 3
-            add(folderLabel)
-            add(NSButton(title: "폴더 선택…", target: self, action: #selector(chooseFolder)))
-            add(NSTextField(wrappingLabelWithString: "인덱싱은 마지막 단계에서 선택해 시작합니다. 지금 폴더를 골라도 파일을 읽거나 인덱싱하지 않습니다."))
-            next.isEnabled = !appDelegate.folder.isEmpty
         case 2:
-            titleLabel.stringValue = "검색 단축키"
-            subtitle.stringValue = "어느 앱에서든 검색창을 바로 여는 키를 지정하세요."
+            titleLabel.stringValue = L("어디에서 찾을까요?")
+            subtitle.stringValue = L("선택한 폴더를 검색 대상으로 사용하고, 이후 파일 변경도 감시합니다.")
+            folderLabel.stringValue = appDelegate.folder.isEmpty ? L("아직 폴더를 선택하지 않았습니다.") : appDelegate.folder
+            folderLabel.maximumNumberOfLines = 3
+            folderLabel.font = .systemFont(ofSize: 14, weight: .medium)
+            add(folderLabel)
+            let choose = NSButton(title: AppLanguage.localize("폴더 선택…"), target: self, action: #selector(chooseFolder))
+            choose.bezelStyle = .rounded
+            add(choose)
+            add(note(L("인덱싱은 마지막 단계에서 선택해 시작합니다. 지금 폴더를 골라도 파일을 읽거나 인덱싱하지 않습니다.")))
+            next.isEnabled = !appDelegate.folder.isEmpty
+        case 3:
+            titleLabel.stringValue = L("검색 단축키")
+            subtitle.stringValue = L("어느 앱에서든 검색창을 바로 여는 키를 지정하세요.")
             let shortcut = ShortcutRecorderButton(title: appDelegate.shortcutName, target: appDelegate, action: #selector(AppDelegate.recordShortcut(_:)))
             shortcut.appDelegate = appDelegate
-            let help = NSTextField(wrappingLabelWithString: "기본값은 ⌥Space입니다. 버튼을 누른 후 사용할 조합을 입력하세요.")
+            shortcut.bezelStyle = .rounded
+            let help = note(L("기본값은 ⌥Space입니다. 버튼을 누른 후 사용할 조합을 입력하세요."))
             appDelegate.shortcutButton = shortcut; appDelegate.shortcutHelp = help
             add(shortcut); add(help)
-            add(NSTextField(wrappingLabelWithString: "↑↓ 결과 선택 · Tab 파일명/의미 검색 · @file / @folder / @chunk 범위 선택"))
+            add(note(L("↑↓ 결과 선택 · Tab 파일명/의미 검색 · @file / @folder / @chunk 범위 선택")))
             next.isEnabled = true
         default:
-            titleLabel.stringValue = "에이전트와 함께 사용"
-            subtitle.stringValue = "원하면 코딩 에이전트가 Weft로 로컬 파일을 찾도록 스킬을 설치할 수 있습니다."
+            titleLabel.stringValue = L("에이전트와 함께 사용")
+            subtitle.stringValue = L("원하면 코딩 에이전트가 Weft로 로컬 파일을 찾도록 스킬을 설치할 수 있습니다.")
             let choices = NSStackView(views: [codex, claude, shared])
-            choices.spacing = 18
+            choices.orientation = .vertical; choices.alignment = .leading; choices.spacing = 10
             add(choices)
-            add(NSButton(title: "선택한 에이전트에 스킬 설치", target: self, action: #selector(installSkill)))
-            add(NSTextField(wrappingLabelWithString: "설치는 이 버튼을 눌렀을 때만 진행됩니다. CLI와 검색 스킬을 설치하며 기존 파일은 백업합니다. 에이전트 설정을 새로 읽거나 재시작해야 스킬이 나타날 수 있습니다."))
+            let install = NSButton(title: AppLanguage.localize("선택한 에이전트에 스킬 설치"), target: self, action: #selector(installSkill))
+            install.bezelStyle = .rounded
+            add(install)
+            add(note(L("설치는 이 버튼을 눌렀을 때만 진행됩니다. CLI와 검색 스킬을 설치하며 기존 파일은 백업합니다. 에이전트 설정을 새로 읽거나 재시작해야 스킬이 나타날 수 있습니다.")))
             add(indexAfterSetup)
             next.isEnabled = true
         }
     }
+    @objc func chooseLanguage(_ sender: NSButton) {
+        guard AppLanguage.allCases.indices.contains(sender.tag) else { return }
+        pendingLanguage = AppLanguage.allCases[sender.tag]
+        render()
+    }
     @objc func advance() {
-        guard !appDelegate.recordingShortcut else { status.stringValue = "단축키를 입력하거나 Esc로 취소하세요."; return }
+        guard !appDelegate.recordingShortcut else { status.stringValue = L("단축키를 입력하거나 Esc로 취소하세요."); return }
         guard next.isEnabled else { return }
         errorMessage = nil
-        if step < 3 { step += 1; render(); return }
+        if step == 0 { AppLanguage.select(pendingLanguage) }
+        if step < 4 { step += 1; render(); return }
         if indexAfterSetup.state == .on && !modelReady {
-            status.stringValue = "모델 준비 단계에서 검색 모델을 먼저 설치하세요."
+            status.stringValue = L("모델 준비 단계에서 검색 모델을 먼저 설치하세요.")
             return
         }
         UserDefaults.standard.set(true, forKey: "onboardingCompleted")
@@ -168,14 +306,14 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.validating = false; self.modelReady = valid
-                self.errorMessage = valid ? nil : "기존 모델 파일을 확인할 수 없습니다. 다시 다운로드하세요."
+                self.errorMessage = valid ? nil : self.L("기존 모델 파일을 확인할 수 없습니다. 다시 다운로드하세요.")
                 if valid { self.progress.doubleValue = 100 }
                 self.render()
             }
         }
     }
     @objc func downloadModel() {
-        if let task = download { task.cancel(); download = nil; errorMessage = "다운로드를 취소했습니다. 다시 시도할 수 있습니다."; render(); return }
+        if let task = download { task.cancel(); download = nil; errorMessage = L("다운로드를 취소했습니다. 다시 시도할 수 있습니다."); render(); return }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 1800
@@ -190,17 +328,22 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.download === downloadTask else { return }
+            self.progress.isIndeterminate = totalBytesExpectedToWrite <= 0
+            if self.progress.isIndeterminate { self.progress.startAnimation(nil) }
+            else { self.progress.stopAnimation(nil) }
             self.progress.doubleValue = totalBytesExpectedToWrite > 0 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) * 100 : 0
-            self.status.stringValue = "다운로드 중 · " + ByteCountFormatter.string(fromByteCount: totalBytesWritten, countStyle: .file)
+            if self.step == 1 {
+                self.status.stringValue = self.LF("다운로드 중 · {0}", ByteCountFormatter.string(fromByteCount: totalBytesWritten, countStyle: .file))
+            }
         }
     }
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         do {
-            guard let response = downloadTask.response as? HTTPURLResponse, (200...299).contains(response.statusCode) else { throw NSError(domain: "Weft", code: 1, userInfo: [NSLocalizedDescriptionKey: "모델 서버에서 다운로드를 거부했습니다."]) }
+            guard let response = downloadTask.response as? HTTPURLResponse, (200...299).contains(response.statusCode) else { throw NSError(domain: "Weft", code: 1, userInfo: [NSLocalizedDescriptionKey: L("모델 서버에서 다운로드를 거부했습니다.")]) }
             let file = try FileHandle(forReadingFrom: location)
             let magic = try file.read(upToCount: 4)
             try file.close()
-            guard magic == Data("GGUF".utf8) else { throw NSError(domain: "Weft", code: 2, userInfo: [NSLocalizedDescriptionKey: "다운로드된 파일이 검색 모델 형식이 아닙니다."]) }
+            guard magic == Data("GGUF".utf8) else { throw NSError(domain: "Weft", code: 2, userInfo: [NSLocalizedDescriptionKey: L("다운로드된 파일이 검색 모델 형식이 아닙니다.")]) }
             try FileManager.default.createDirectory(at: modelURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             let staging = modelURL.deletingLastPathComponent().appendingPathComponent(".model-\(UUID().uuidString).gguf")
             try FileManager.default.moveItem(at: location, to: staging)
@@ -208,7 +351,7 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
             let process = Process(); process.executableURL = appDelegate.engine
             process.arguments = ["--model-file", staging.path, "prepare"]
             process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-            do { try process.run(); process.waitUntilExit(); guard process.terminationStatus == 0 else { throw NSError(domain: "Weft", code: 3, userInfo: [NSLocalizedDescriptionKey: "검색 모델을 확인할 수 없습니다. 다시 다운로드하세요."]) }
+            do { try process.run(); process.waitUntilExit(); guard process.terminationStatus == 0 else { throw NSError(domain: "Weft", code: 3, userInfo: [NSLocalizedDescriptionKey: L("검색 모델을 확인할 수 없습니다. 다시 다운로드하세요.")]) }
                 if FileManager.default.fileExists(atPath: modelURL.path) { _ = try FileManager.default.replaceItemAt(modelURL, withItemAt: staging) }
                 else { try FileManager.default.moveItem(at: staging, to: modelURL) }
             } catch { try? FileManager.default.removeItem(at: staging); throw error }
@@ -229,7 +372,7 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
         guard let error = error else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.download === task else { return }
-            self.download = nil; self.errorMessage = "다운로드 실패: " + error.localizedDescription; self.render()
+            self.download = nil; self.errorMessage = self.LF("다운로드 실패: {0}", error.localizedDescription); self.render()
         }
     }
     @objc func installSkill() { installSkillFiles(in: FileManager.default.homeDirectoryForCurrentUser) }
@@ -239,7 +382,7 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
             if codex.state == .on { targets.append(home.appendingPathComponent(".codex/skills")) }
             if claude.state == .on { targets.append(home.appendingPathComponent(".claude/skills")) }
             if shared.state == .on { targets.append(home.appendingPathComponent(".agents/skills")) }
-            guard !targets.isEmpty else { status.stringValue = "설치할 에이전트를 하나 이상 선택하세요."; return }
+            guard !targets.isEmpty else { status.stringValue = L("설치할 에이전트를 하나 이상 선택하세요."); return }
             let cli = home.appendingPathComponent(".cargo/bin/weft")
             try FileManager.default.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
             let temporary = cli.deletingLastPathComponent().appendingPathComponent(".weft-\(UUID().uuidString)")
@@ -262,7 +405,7 @@ final class OnboardingController: NSWindowController, URLSessionDownloadDelegate
                 }
                 try FileManager.default.copyItem(at: source, to: destination)
             }
-            status.stringValue = "스킬 설치 완료 · 선택한 에이전트에서 weft-semantic-search를 사용할 수 있습니다."
-        } catch { status.stringValue = "스킬 설치 실패: " + error.localizedDescription }
+            status.stringValue = L("스킬 설치 완료 · 선택한 에이전트에서 weft-semantic-search를 사용할 수 있습니다.")
+        } catch { status.stringValue = LF("스킬 설치 실패: {0}", error.localizedDescription) }
     }
 }

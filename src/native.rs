@@ -414,21 +414,7 @@ impl NativeModel {
         );
         // For seq <= 513 every relative position is inside the 512-token
         // sliding window; adding an all-zero mask is mathematically redundant.
-        let mask = if seq > 513 {
-            let mut cache = self.long_mask.lock().unwrap();
-            if cache.is_none() {
-                *cache = Some(precompute_mask(&self.device, MAX_LEN)?);
-            }
-            Some(
-                cache
-                    .as_ref()
-                    .unwrap()
-                    .narrow(1, 0, seq)?
-                    .narrow(2, 0, seq)?,
-            )
-        } else {
-            None
-        };
+        let mask = cached_mask(&mut self.long_mask.lock().unwrap(), &self.device, seq)?;
 
         for layer in 0..24 {
             let ple = per_layer.narrow(1, layer, 1)?.squeeze(1)?;
@@ -445,11 +431,7 @@ impl NativeModel {
             .linear(&self.output, &x.mean_keepdim(0)?)?
             .squeeze(0)?
             .contiguous()?;
-        let norm = pooled.sqr()?.sum_all()?.sqrt()?.to_scalar::<f32>()?;
-        if norm == 0. || !norm.is_finite() {
-            bail!("invalid zero or non-finite embedding norm")
-        }
-        Ok(pooled.affine(1. / norm as f64, 0.)?.to_vec1::<f32>()?)
+        normalize_embedding(&pooled)
     }
 
     fn layer_forward(
@@ -679,6 +661,32 @@ fn read_mapped_gguf_tensor(
     )?)
 }
 
+fn normalize_embedding(pooled: &Tensor) -> Result<Vec<f32>> {
+    let norm = pooled.sqr()?.sum_all()?.sqrt()?;
+    // Normalize before the single device-to-host transfer. Invalid norms
+    // produce non-finite values or an all-zero vector; reject both on the host.
+    let output = pooled.broadcast_div(&norm)?.to_vec1::<f32>()?;
+    if output.iter().any(|value| !value.is_finite()) || !output.iter().any(|value| *value != 0.) {
+        bail!("invalid zero or non-finite embedding norm")
+    }
+    Ok(output)
+}
+
+fn cached_mask(cache: &mut Option<Tensor>, device: &Device, seq: usize) -> Result<Option<Tensor>> {
+    if seq <= 513 {
+        // A short query also releases a previously retained long-document mask.
+        *cache = None;
+    } else if cache
+        .as_ref()
+        .is_none_or(|mask| mask.dims() != [1, seq, seq])
+    {
+        // Retain only one exact-size mask, reusing it for equal-length batches.
+        *cache = None;
+        *cache = Some(precompute_mask(device, seq)?);
+    }
+    Ok(cache.clone())
+}
+
 fn precompute_mask(device: &Device, max_len: usize) -> Result<Tensor> {
     let mut mask = vec![0f32; max_len * max_len];
     for qi in 0..max_len {
@@ -872,6 +880,91 @@ fn take_string_array(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sliding_mask_exact_size_cache_and_parity() -> Result<()> {
+        let baseline = precompute_mask(&Device::Cpu, MAX_LEN)?;
+        let mut cache = None;
+        for seq in [514, 600, 600, 1024, 514, 513, 128] {
+            let actual = cached_mask(&mut cache, &Device::Cpu, seq)?;
+            if seq <= 513 {
+                assert!(actual.is_none());
+                assert!(cache.is_none(), "short queries release the long mask");
+                let original = baseline.narrow(1, 0, seq)?.narrow(2, 0, seq)?;
+                assert!(
+                    original
+                        .flatten_all()?
+                        .to_vec1::<f32>()?
+                        .iter()
+                        .all(|v| *v == 0.)
+                );
+            } else {
+                let actual = actual.unwrap();
+                assert_eq!(actual.dims(), [1, seq, seq]);
+                assert!(actual.is_contiguous());
+                let original = baseline.narrow(1, 0, seq)?.narrow(2, 0, seq)?;
+                assert_eq!(
+                    actual.flatten_all()?.to_vec1::<f32>()?,
+                    original.flatten_all()?.to_vec1::<f32>()?
+                );
+                let reused = cached_mask(&mut cache, &Device::Cpu, seq)?.unwrap();
+                assert_eq!(actual.id(), reused.id(), "equal lengths reuse the mask");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn device_normalization_matches_host_scalar_and_rejects_invalid() -> Result<()> {
+        for values in [
+            vec![3f32, 4., -2.],
+            vec![0.001, -0.002, 0.003],
+            vec![0., 1., 0.],
+        ] {
+            let pooled = Tensor::from_vec(values.clone(), values.len(), &Device::Cpu)?;
+            let norm = pooled.sqr()?.sum_all()?.sqrt()?.to_scalar::<f32>()?;
+            let previous = pooled.affine(1. / norm as f64, 0.)?.to_vec1::<f32>()?;
+            let actual = normalize_embedding(&pooled)?;
+            for (a, b) in actual.iter().zip(previous) {
+                assert!((a - b).abs() < 1e-7);
+            }
+            let norm = actual
+                .iter()
+                .map(|v| f64::from(*v).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!((norm - 1.).abs() < 1e-6);
+        }
+        for values in [
+            vec![0f32, 0.],
+            vec![f32::NAN, 1.],
+            vec![f32::INFINITY, 1.],
+            vec![f32::MAX, 1.],
+        ] {
+            let pooled = Tensor::from_vec(values, 2, &Device::Cpu)?;
+            assert_eq!(
+                normalize_embedding(&pooled).unwrap_err().to_string(),
+                "invalid zero or non-finite embedding norm"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "requires a Metal GPU; checks device normalization parity"]
+    fn device_normalization_cpu_metal_parity() -> Result<()> {
+        let metal = Device::new_metal(0)?;
+        let values = (0..768)
+            .map(|i| ((i as f32) - 384.) / 768.)
+            .collect::<Vec<_>>();
+        let cpu = normalize_embedding(&Tensor::from_vec(values.clone(), 768, &Device::Cpu)?)?;
+        let gpu = normalize_embedding(&Tensor::from_vec(values, 768, &metal)?)?;
+        for (a, b) in cpu.iter().zip(gpu) {
+            assert!((a - b).abs() < 1e-6);
+        }
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires local GGUF; verifies prepared layout and tokenizer parity"]

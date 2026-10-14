@@ -3,6 +3,8 @@ mod daemon;
 mod document;
 mod embed;
 mod hierarchy;
+mod hybrid;
+mod lexical;
 mod native;
 mod prepared;
 mod query;
@@ -128,11 +130,17 @@ enum Cmd {
     /// Rank indexed files by a natural-language question.
     Search {
         query: String,
-        /// semantic, path (filename/folder terms), or hybrid (rank fusion).
-        #[arg(long, default_value = "semantic", value_parser = ["semantic", "path", "hybrid"])]
+        /// hybrid (content + meaning), semantic, lexical (no model), or path.
+        #[arg(long, default_value = "hybrid", value_parser = ["semantic", "path", "hybrid", "lexical"])]
         mode: String,
         #[arg(long, default_value_t = 10)]
         top: usize,
+        /// Minimum cosine evidence for semantic matches; exact keywords can still qualify.
+        #[arg(long, default_value_t = 0.30)]
+        min_similarity: f32,
+        /// Hide results below this fraction of the best score (0 disables the relative cutoff).
+        #[arg(long, default_value_t = 0.50)]
+        weak_ratio: f32,
         #[arg(long)]
         json: bool,
     },
@@ -208,6 +216,15 @@ enum Cmd {
         /// Optional labeled queries file for precision benchmarking; omit for in-situ system benchmark.
         #[arg(long)]
         queries: Option<PathBuf>,
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare semantic, old RRF, lexical and hybrid ablations on labeled queries.
+    BenchSearch {
+        #[arg(long)]
+        queries: PathBuf,
         #[arg(long, default_value_t = 10)]
         top: usize,
         #[arg(long)]
@@ -293,6 +310,14 @@ fn main() -> Result<()> {
         Store::open(&cli.db)?
     } else {
         Store::open_read_only(&cli.db)?
+    };
+    let _search_activity = if matches!(
+        &cli.command,
+        Cmd::Search { .. } | Cmd::Retrieve(..) | Cmd::Query { .. } | Cmd::Q { .. }
+    ) {
+        resource::begin_search(&store).ok()
+    } else {
+        None
     };
     match &cli.command {
         Cmd::Prepare => unreachable!("handled before opening database"),
@@ -392,7 +417,7 @@ fn main() -> Result<()> {
                 exclude,
                 file_types,
                 *dry_run,
-                duty_cycle.unwrap_or(100),
+                duty_cycle.unwrap_or(if *watch { 25 } else { 100 }),
                 *verify_hashes,
                 true,
                 &mut index_runtime,
@@ -411,7 +436,7 @@ fn main() -> Result<()> {
                     *all && path.is_none(),
                     exclude,
                     file_types,
-                    duty_cycle.unwrap_or(100),
+                    duty_cycle.unwrap_or(if *watch { 25 } else { 100 }),
                     &mut index_runtime,
                 )?;
             }
@@ -420,34 +445,78 @@ fn main() -> Result<()> {
             query,
             mode,
             top,
+            min_similarity,
+            weak_ratio,
             json,
         } => {
             if query.trim().is_empty() {
                 bail!("query must not be empty");
             }
-            let paths = if mode != "semantic" {
-                store.paths(query, None, None)?
+            if !min_similarity.is_finite()
+                || !(-1.0..=1.0).contains(min_similarity)
+                || !weak_ratio.is_finite()
+                || !(0.0..=1.0).contains(weak_ratio)
+            {
+                bail!("--min-similarity must be -1..1 and --weak-ratio must be 0..1");
+            }
+            let format_hits = if mode == "hybrid" {
+                hybrid::format_lookup(&store, query, *top)?
             } else {
-                Vec::new()
+                None
             };
-            let mut hits = if mode == "path" {
-                paths
+            let mut hits = if *top == 0 {
+                Vec::new()
+            } else if let Some(hits) = format_hits {
+                hits
+            } else if mode == "path" {
+                store.paths_limited(query, None, None, *top)?
             } else {
-                let (dim, enc) = config(&store)?;
-                check_backend(&store, &cli)?;
-                let mut engine = new_embedder(&cli)?;
-                let q = engine.embed(
-                    &[Input {
-                        kind: "text",
-                        value: query.clone(),
-                    }],
-                    "query",
-                )?;
-                let semantic = store.hits(&normalized_prefix(&q[0], dim)?, enc, *top)?;
-                if mode == "hybrid" {
-                    query::union(vec![semantic, paths])
+                let lexical = if mode == "hybrid" || mode == "lexical" {
+                    lexical::search(&store.conn, query, 200.max(*top))?
                 } else {
-                    semantic
+                    Vec::new()
+                };
+                if mode == "lexical" {
+                    lexical
+                        .into_iter()
+                        .map(|entry| {
+                            let mut hit = entry.hit;
+                            hit.score = entry.coverage;
+                            hit
+                        })
+                        .collect()
+                } else if let Some(hits) = hybrid::lexical_lookup(query, &lexical, *top) {
+                    hits
+                } else {
+                    let (dim, enc) = config(&store)?;
+                    check_backend(&store, &cli)?;
+                    let q = search_embedding(&cli, query)?;
+                    let vector = normalized_prefix(&q, dim)?;
+                    if mode == "hybrid" {
+                        hybrid::search_with_lexical_cutoff(
+                            &store,
+                            query,
+                            &vector,
+                            enc,
+                            *top,
+                            lexical,
+                            *min_similarity,
+                            *weak_ratio,
+                        )?
+                    } else {
+                        let mut hits = store.hits(&vector, enc, *top)?;
+                        hits.retain(|hit| hit.score >= *min_similarity);
+                        if *weak_ratio > 0.0 {
+                            if let Some(best) = hits
+                                .first()
+                                .map(|hit| hit.score)
+                                .filter(|score| *score > 0.0)
+                            {
+                                hits.retain(|hit| hit.score >= best * weak_ratio);
+                            }
+                        }
+                        hits
+                    }
                 }
             };
             hits.truncate(*top);
@@ -776,6 +845,9 @@ fn main() -> Result<()> {
             }
         },
         Cmd::Bench { queries, top, json } => bench(&cli, &store, queries.as_deref(), *top, *json)?,
+        Cmd::BenchSearch { queries, top, json } => {
+            bench_search(&cli, &store, queries, *top, *json)?
+        }
         Cmd::Flush => {
             let (dim, enc) = config(&store)?;
             if enc != Encoding::Q8 {
@@ -800,7 +872,7 @@ fn main() -> Result<()> {
             let listener = server.bind()?;
 
             // ── Phase 2: load model (clients are queued in the OS accept backlog) ──
-            let mut engine = new_embedder(&cli)?;
+            let engine = std::cell::RefCell::new(Some(new_embedder(&cli)?));
 
             // ── Phase 3: serve (drains backlog + enters normal loop) ──
             let store_db = cli.db.clone();
@@ -808,7 +880,11 @@ fn main() -> Result<()> {
             server.serve(
                 listener,
                 |text| {
+                    let _activity = resource::begin_search(&store).ok();
                     Ok(engine
+                        .borrow_mut()
+                        .as_mut()
+                        .context("daemon model released")?
                         .embed(
                             &[Input {
                                 kind: "text",
@@ -818,10 +894,12 @@ fn main() -> Result<()> {
                         )?
                         .remove(0))
                 },
-                move || {
+                || {
                     if no_auto_index {
                         return Ok(());
                     }
+                    // Serving has ended; release the query model before idle indexing.
+                    engine.borrow_mut().take();
                     let mut s = Store::open(&store_db)?;
                     let views = s.list_views()?;
                     let mut indexed_any = false;
@@ -848,7 +926,7 @@ fn main() -> Result<()> {
                                 &[],
                                 &[],
                                 false,
-                                100,
+                                25,
                                 false,
                                 false,
                                 &mut index_runtime,
@@ -904,6 +982,41 @@ fn check_backend(store: &Store, cli: &Cli) -> Result<()> {
     }
     Ok(())
 }
+fn search_embedding(cli: &Cli, text: &str) -> Result<Vec<f32>> {
+    let socket = cli
+        .embedding_socket
+        .clone()
+        .unwrap_or_else(|| daemon_socket(cli));
+    // The desktop retries after starting its daemon. Fail fast when no socket
+    // exists, so a lexical miss can request inference without a 30s delay.
+    if cli.embedding_socket.is_some() && std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        bail!("embedding daemon unavailable; reopen the search panel to restart it");
+    }
+    if let Some(result) = daemon::DaemonClient::try_embed_wait(
+        &socket,
+        text,
+        if cli.embedding_socket.is_some() {
+            std::time::Duration::from_secs(30)
+        } else {
+            std::time::Duration::ZERO
+        },
+    ) {
+        return result;
+    }
+    if cli.embedding_socket.is_some() {
+        bail!("embedding daemon unavailable; reopen the search panel to restart it");
+    }
+    Ok(new_embedder(cli)?
+        .embed(
+            &[Input {
+                kind: "text",
+                value: text.into(),
+            }],
+            "query",
+        )?
+        .remove(0))
+}
+
 fn new_embedder(cli: &Cli) -> Result<Embedder> {
     Embedder::new(
         &cli.backend,
@@ -1150,10 +1263,18 @@ fn index(
         .collect::<std::io::Result<Vec<_>>>()?;
     let db = cli.db.canonicalize()?;
     excluded.push(db.clone());
-    for suffix in ["-wal", "-shm", "-journal"] {
+    for suffix in [
+        "-wal",
+        "-shm",
+        "-journal",
+        ".vectors.bin",
+        ".vectors.bin.tmp",
+        ".vectors.bin.search-activity",
+    ] {
         excluded.push(PathBuf::from(format!("{}{suffix}", db.display())));
     }
     excluded.push(db.with_extension("index.lock"));
+    excluded.push(db.with_extension("watch.lock"));
     excluded.push(db.with_extension("log"));
     let report = |status: &str,
                   discovered: usize,
@@ -1282,7 +1403,10 @@ fn index(
             continue;
         }
         let stamp = scan::file_stamp(&metadata);
-        if !verify_hashes && store.unchanged_stat(&path_str, kind, &stamp)? {
+        if !verify_hashes
+            && store.unchanged_stat(&path_str, kind, &stamp)?
+            && lexical::has_document(&store.conn, &path_str)?
+        {
             skipped += 1;
             continue;
         }
@@ -1353,7 +1477,8 @@ fn index(
         } else {
             blake3::hash(&data).to_hex().to_string()
         };
-        if store.unchanged(&path_str, &hash)? {
+        let content_unchanged = store.unchanged(&path_str, &hash)?;
+        if content_unchanged && lexical::has_document(&store.conn, &path_str)? {
             // A metadata change (touch or move) can preserve the file contents.
             if std::fs::metadata(path)
                 .ok()
@@ -1428,6 +1553,24 @@ fn index(
             skipped += 1;
             continue;
         }
+        let texts: Vec<_> = segments
+            .iter()
+            .filter(|(_, _, input)| input.kind == "text")
+            .map(|(start, end, input)| (*start, *end, input.value.clone()))
+            .collect();
+        if content_unchanged {
+            // Legacy indexes gain postings without loading a model or replacing vectors.
+            let tx = store.conn.transaction()?;
+            let id: i64 =
+                tx.query_row("SELECT id FROM documents WHERE path=?1", [&path_str], |r| {
+                    r.get(0)
+                })?;
+            lexical::replace(&tx, id, &texts)?;
+            tx.commit()?;
+            store.set_stat(&path_str, &stamp)?;
+            skipped += 1;
+            continue;
+        }
         let mut cache = store.cached_chunks(&path_str)?;
         if segments.len() > 32 {
             let mut progress = report("running", discovered, added, skipped, filename_only, errors);
@@ -1438,7 +1581,7 @@ fn index(
         }
         let mut packed = Vec::with_capacity(segments.len());
         let mut success = true;
-        for batch in segments.chunks(16) {
+        for batch in segments.chunks(resource::index_batch_size(store)?) {
             if !resource::gate_pair(store, &mut *engine, &mut *media_engine)? {
                 return Ok(());
             }
@@ -1547,7 +1690,14 @@ fn index(
         if !success {
             continue;
         }
-        store.replace(&path_str, &hash, kind, metadata.len() as usize, &packed)?;
+        store.replace_with_lexical(
+            &path_str,
+            &hash,
+            kind,
+            metadata.len() as usize,
+            &packed,
+            Some(&texts),
+        )?;
         if std::fs::metadata(path)
             .ok()
             .is_some_and(|m| scan::file_stamp(&m) == stamp)
@@ -1658,6 +1808,11 @@ fn watch_index(
 
     let mut last_work = Instant::now();
     loop {
+        // Even a stream of ignored database/lease events must allow unloading.
+        if last_work.elapsed() >= Duration::from_secs(90) {
+            runtime.engine = None;
+            runtime.media_engine = None;
+        }
         let first = loop {
             match receiver.recv_timeout(Duration::from_secs(5)) {
                 Ok(event) => break event.context("filesystem watcher stopped")?,
@@ -1772,7 +1927,9 @@ fn watch_index(
         if changed && enc == Encoding::Q8 {
             store.flush_vectors_bin(dim)?;
         }
-        last_work = Instant::now();
+        if changed {
+            last_work = Instant::now();
+        }
     }
 }
 
@@ -1824,6 +1981,113 @@ fn watch_scan_targets(
 struct BenchmarkQuery {
     query: String,
     relevant: Vec<String>,
+}
+
+fn bench_search(cli: &Cli, store: &Store, path: &Path, top: usize, json: bool) -> Result<()> {
+    let labels: Vec<BenchmarkQuery> = serde_json::from_slice(&std::fs::read(path)?)?;
+    if top == 0 || labels.is_empty() || labels.iter().any(|q| q.relevant.is_empty()) {
+        bail!("benchmark needs labeled queries and --top > 0");
+    }
+    let (dim, enc) = config(store)?;
+    check_backend(store, cli)?;
+    let mut engine = new_embedder(cli)?;
+    let started = Instant::now();
+    let vectors: Vec<_> = labels
+        .iter()
+        .map(|q| {
+            let raw = engine.embed(
+                &[Input {
+                    kind: "text",
+                    value: q.query.clone(),
+                }],
+                "query",
+            )?;
+            normalized_prefix(&raw[0], dim)
+        })
+        .collect::<Result<_>>()?;
+    let embedding_ms = started.elapsed().as_secs_f64() * 1000.;
+    let mut reports = Vec::new();
+    for variant in [
+        "semantic",
+        "rrf",
+        "lexical",
+        "fts_cosine",
+        "intent_cosine",
+        "intent_zscore",
+    ] {
+        let mut latencies = Vec::new();
+        let (mut recall, mut mrr, mut ndcg) = (0., 0., 0.);
+        let mut predictions = Vec::new();
+        for (q, vector) in labels.iter().zip(&vectors) {
+            let mut hits = Vec::new();
+            for _ in 0..7 {
+                let timer = Instant::now();
+                hits = match variant {
+                    "semantic" => store.hits(vector, enc, top)?,
+                    "rrf" => {
+                        let mut h = query::union(vec![
+                            store.hits(vector, enc, top)?,
+                            store.paths(&q.query, None, None)?,
+                        ]);
+                        h.truncate(top);
+                        h
+                    }
+                    "lexical" => lexical::search(&store.conn, &q.query, top)?
+                        .into_iter()
+                        .map(|h| h.hit)
+                        .collect(),
+                    "fts_cosine" => {
+                        hybrid::search_variant(store, &q.query, vector, enc, top, false, false)?
+                    }
+                    "intent_cosine" => {
+                        hybrid::search_variant(store, &q.query, vector, enc, top, true, false)?
+                    }
+                    _ => hybrid::search(store, &q.query, vector, enc, top)?,
+                };
+                latencies.push(timer.elapsed().as_secs_f64() * 1000.);
+            }
+            let ranks: Vec<_> = hits
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| {
+                    q.relevant
+                        .iter()
+                        .any(|r| h.path.ends_with(r))
+                        .then_some(i + 1)
+                })
+                .collect();
+            recall += ranks.len() as f64 / q.relevant.len() as f64;
+            mrr += ranks.first().map_or(0., |r| 1. / *r as f64);
+            let dcg: f64 = ranks.iter().map(|r| 1. / (*r as f64 + 1.).log2()).sum();
+            let ideal: f64 = (1..=q.relevant.len().min(top))
+                .map(|r| 1. / (r as f64 + 1.).log2())
+                .sum();
+            ndcg += dcg / ideal;
+            predictions.push(serde_json::json!({"query":q.query,"expected":q.relevant,"hits":hits.iter().map(|h|&h.path).collect::<Vec<_>>()}));
+        }
+        latencies.sort_by(f64::total_cmp);
+        let n = labels.len() as f64;
+        reports.push(serde_json::json!({"variant":variant,"recall_at_k":recall/n,"mrr_at_k":mrr/n,"ndcg_at_k":ndcg/n,
+            "p50_search_ms":latencies[latencies.len()/2],"p95_search_ms":latencies[((latencies.len() as f64*0.95).ceil() as usize-1).min(latencies.len()-1)],"queries":predictions}));
+    }
+    let report = serde_json::json!({"build":benchmark_build_info(),"top":top,"query_count":labels.len(),"embedding_ms_total":embedding_ms,
+        "timing":"7 warm search samples per query; embedding and model loading excluded; production exact lookup bypass measured separately", "variants":reports});
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for r in &reports {
+            println!(
+                "{} recall {:.3} MRR {:.3} NDCG {:.3} p50 {:.2}ms p95 {:.2}ms",
+                r["variant"],
+                r["recall_at_k"],
+                r["mrr_at_k"],
+                r["ndcg_at_k"],
+                r["p50_search_ms"],
+                r["p95_search_ms"]
+            );
+        }
+    }
+    Ok(())
 }
 
 fn benchmark_build_info() -> serde_json::Value {
@@ -2289,6 +2553,25 @@ fn rank(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[test]
+    fn requested_missing_daemon_fails_fast_without_loading_a_second_model() {
+        let socket =
+            std::env::temp_dir().join(format!("weft-missing-search-{}.sock", std::process::id()));
+        let cli = Cli::try_parse_from([
+            "weft",
+            "--embedding-socket",
+            socket.to_str().unwrap(),
+            "--model-file",
+            "/missing-weft-model.gguf",
+            "search",
+            "query",
+        ])
+        .unwrap();
+        let started = Instant::now();
+        let error = search_embedding(&cli, "query").unwrap_err();
+        assert!(error.to_string().contains("embedding daemon unavailable"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
     #[test]
     fn watcher_batches_files_by_parent_and_keeps_cross_folder_scans_bounded() {
         let root = std::env::temp_dir().join(format!("weft-watch-batch-{}", std::process::id()));

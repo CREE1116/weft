@@ -177,6 +177,10 @@ pub fn excluded(path: &Path, computer: bool, extra: &[PathBuf]) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
     name.starts_with("~$")
+        || matches!(
+            name.as_str(),
+            ".ds_store" | ".localized" | "thumbs.db" | "desktop.ini"
+        )
         || name == ".env"
         || name.starts_with(".env.")
         || name.starts_with("id_rsa")
@@ -204,6 +208,30 @@ pub fn filename_text(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn os_metadata_exclusions_match_only_the_filename() {
+        for name in [
+            ".DS_Store",
+            ".localized",
+            "Thumbs.db",
+            "desktop.ini",
+            "THUMBS.DB",
+        ] {
+            for computer in [false, true] {
+                assert!(excluded(&Path::new("/docs").join(name), computer, &[]));
+                assert!(!excluded(
+                    &Path::new("/docs").join(name).join("notes.txt"),
+                    computer,
+                    &[]
+                ));
+            }
+            assert!(!excluded(
+                &Path::new("/docs").join(format!("{name}.txt")),
+                false,
+                &[]
+            ));
+        }
+    }
     #[test]
     fn selected_file_types_are_case_insensitive_and_shared_with_watch() {
         let selected = vec!["pdf".into(), "word".into(), "image".into()];

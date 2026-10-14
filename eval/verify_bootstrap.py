@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 REPO = Path(__file__).resolve().parents[1]
 SKILL = REPO / ".agents/skills/weft-semantic-search"
@@ -130,7 +131,8 @@ with open(os.environ['TEST_LOG'],'a') as f: f.write(json.dumps([Path(sys.argv[0]
         assert not list(root.glob("weft-source.*"))
         if args.binary:
             actual = Path(args.binary).resolve()
-            assert subprocess.check_output([str(actual), "--version"], text=True).strip() == "weft 1.0.0"
+            version = tomllib.loads((REPO / "Cargo.toml").read_text())["package"]["version"]
+            assert subprocess.check_output([str(actual), "--version"], text=True).strip() == f"weft {version}"
             shutil.copy2(actual, root / "runtime/bin/weft")
             before = len(calls())
             ready = run()

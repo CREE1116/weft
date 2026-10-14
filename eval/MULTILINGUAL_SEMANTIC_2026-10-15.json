@@ -1,0 +1,85 @@
+{
+  "scope": "actual local native GGUF/Metal smoke; eight languages querying three English documents; not a multilingual accuracy benchmark",
+  "cases": [
+    {
+      "language": "English",
+      "query": "Who must approve a supplier invoice before it is paid?",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    },
+    {
+      "language": "French",
+      "query": "Qui doit approuver une facture fournisseur avant son paiement ?",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    },
+    {
+      "language": "Spanish",
+      "query": "¿Quién debe aprobar una factura del proveedor antes de pagarla?",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    },
+    {
+      "language": "German",
+      "query": "Wer muss eine Lieferantenrechnung vor der Zahlung genehmigen?",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    },
+    {
+      "language": "Russian",
+      "query": "Кто должен утвердить счет поставщика перед оплатой?",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    },
+    {
+      "language": "Arabic",
+      "query": "من يجب أن يوافق على فاتورة المورد قبل دفعها؟",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    },
+    {
+      "language": "Japanese",
+      "query": "取引先の請求書を支払う前に誰の承認が必要ですか？",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    },
+    {
+      "language": "Chinese",
+      "query": "支付供应商发票之前需要谁批准？",
+      "ranked_files": [
+        "invoice.md",
+        "database.md",
+        "travel.md"
+      ],
+      "expected_first": true
+    }
+  ]
+}

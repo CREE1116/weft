@@ -1,0 +1,2217 @@
+{
+  "build": {
+    "built_at_unix": 1791996061,
+    "commit": "bc11fe2c9be9",
+    "dirty": true,
+    "profile": "release",
+    "target": "aarch64-apple-darwin",
+    "version": "1.0.0"
+  },
+  "embedding_ms_total": 378.84158299999996,
+  "query_count": 21,
+  "timing": "7 warm search samples per query; embedding and model loading excluded; production exact lookup bypass measured separately",
+  "top": 10,
+  "variants": [
+    {
+      "mrr_at_k": 0.9126984126984126,
+      "ndcg_at_k": 0.934806178741498,
+      "p50_search_ms": 0.033083999999999995,
+      "p95_search_ms": 0.037584,
+      "queries": [
+        {
+          "expected": [
+            "retry-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "lookup-a.md",
+            "engineering/queue-priority.md",
+            "security/tls-certificates.md",
+            "lookup-b.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md",
+            "engineering/database-migration.md"
+          ],
+          "query": "How long does a failed task wait before it retries again?"
+        },
+        {
+          "expected": [
+            "database-migration.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "lookup-a.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "What is the procedure for safely changing a production database schema?"
+        },
+        {
+          "expected": [
+            "kyoto-budget.md"
+          ],
+          "hits": [
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-plan.md",
+            "finance/expense-receipts.md",
+            "finance/savings-plan.md",
+            "travel/osaka-hotel.md",
+            "lookup-b.md",
+            "food/coffee.md",
+            "health/morning-routine.md"
+          ],
+          "query": "How much money should I set aside for hotels, transport and food on the Kyoto vacation?"
+        },
+        {
+          "expected": [
+            "osaka-plan.md"
+          ],
+          "hits": [
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "finance/expense-receipts.md",
+            "health/morning-routine.md",
+            "engineering/queue-priority.md",
+            "health/hydration.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "Where do we eat and what should we visit in Osaka?"
+        },
+        {
+          "expected": [
+            "invoice-approval.md"
+          ],
+          "hits": [
+            "finance/invoice-approval.md",
+            "lookup-a.md",
+            "finance/monthly-close.md",
+            "finance/expense-receipts.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "Who must sign off on a costly supplier bill?"
+        },
+        {
+          "expected": [
+            "sleep-notes.md"
+          ],
+          "hits": [
+            "health/sleep-notes.md",
+            "health/hydration.md",
+            "health/morning-routine.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-weather.md",
+            "engineering/queue-priority.md",
+            "food/pizza-dough.md",
+            "finance/savings-plan.md",
+            "travel/osaka-plan.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "Ways to get better rest at night"
+        },
+        {
+          "expected": [
+            "sourdough.md"
+          ],
+          "hits": [
+            "food/sourdough.md",
+            "food/pizza-dough.md",
+            "food/coffee.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "health/hydration.md",
+            "security/key-rotation.md",
+            "engineering/schema-backup.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "How do I feed the culture used to make fermented bread?"
+        },
+        {
+          "expected": [
+            "key-rotation.md"
+          ],
+          "hits": [
+            "security/key-rotation.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "engineering/database-migration.md",
+            "engineering/timeout-policy.md",
+            "finance/expense-receipts.md",
+            "finance/savings-plan.md"
+          ],
+          "query": "What steps protect a service after replacing its access token?"
+        },
+        {
+          "expected": [
+            "timeout-policy.md"
+          ],
+          "hits": [
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "security/key-rotation.md",
+            "food/coffee.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md"
+          ],
+          "query": "What maximum wait is allowed for one web request?"
+        },
+        {
+          "expected": [
+            "schema-backup.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "engineering/retry-policy.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "lookup-a.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "How do we restore the database if a schema deployment goes wrong?"
+        },
+        {
+          "expected": [
+            "tokyo-budget.md"
+          ],
+          "hits": [
+            "travel/tokyo-budget.md",
+            "travel/kyoto-budget.md",
+            "travel/osaka-plan.md",
+            "finance/expense-receipts.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-weather.md",
+            "lookup-b.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md",
+            "food/coffee.md"
+          ],
+          "query": "How much will the Tokyo hotel, trains and restaurants cost?"
+        },
+        {
+          "expected": [
+            "osaka-hotel.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "travel/osaka-plan.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "finance/savings-plan.md",
+            "health/morning-routine.md"
+          ],
+          "query": "Which neighborhood hotel has simple airport access in Osaka?"
+        },
+        {
+          "expected": [
+            "expense-receipts.md"
+          ],
+          "hits": [
+            "finance/expense-receipts.md",
+            "finance/invoice-approval.md",
+            "finance/monthly-close.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "engineering/database-migration.md",
+            "finance/savings-plan.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "security/key-rotation.md"
+          ],
+          "query": "When do staff need to file purchase receipts to get paid back?"
+        },
+        {
+          "expected": [
+            "morning-routine.md"
+          ],
+          "hits": [
+            "health/morning-routine.md",
+            "health/sleep-notes.md",
+            "health/hydration.md",
+            "finance/savings-plan.md",
+            "security/key-rotation.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "security/passwords.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-plan.md"
+          ],
+          "query": "What daily habit can help me feel more alert after waking?"
+        },
+        {
+          "expected": [
+            "pizza-dough.md"
+          ],
+          "hits": [
+            "food/pizza-dough.md",
+            "food/sourdough.md",
+            "food/coffee.md",
+            "engineering/schema-backup.md",
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "security/passwords.md",
+            "finance/savings-plan.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "How should I leave yeast dough to rise for pizza?"
+        },
+        {
+          "expected": [
+            "passwords.md"
+          ],
+          "hits": [
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "security/tls-certificates.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/queue-priority.md",
+            "finance/savings-plan.md",
+            "engineering/retry-policy.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "How can I create different strong logins for every website?"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "finance/invoice-approval.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "engineering/database-migration.md",
+            "engineering/code-review.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "INV-2041"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/retry-policy.md",
+            "engineering/code-review.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "K7Q2LM"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-a.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "finance/expense-receipts.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "retryHandler"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "finance/invoice-approval.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "security/key-rotation.md"
+          ],
+          "query": "청구서 승인"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "lookup-a.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "데이터베이스 재시도"
+        }
+      ],
+      "recall_at_k": 1.0,
+      "variant": "semantic"
+    },
+    {
+      "mrr_at_k": 0.9126984126984126,
+      "ndcg_at_k": 0.934806178741498,
+      "p50_search_ms": 0.046,
+      "p95_search_ms": 0.057834,
+      "queries": [
+        {
+          "expected": [
+            "retry-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "lookup-a.md",
+            "engineering/queue-priority.md",
+            "security/tls-certificates.md",
+            "lookup-b.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md",
+            "engineering/database-migration.md"
+          ],
+          "query": "How long does a failed task wait before it retries again?"
+        },
+        {
+          "expected": [
+            "database-migration.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "lookup-a.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "What is the procedure for safely changing a production database schema?"
+        },
+        {
+          "expected": [
+            "kyoto-budget.md"
+          ],
+          "hits": [
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-plan.md",
+            "finance/expense-receipts.md",
+            "finance/savings-plan.md",
+            "travel/osaka-hotel.md",
+            "lookup-b.md",
+            "food/coffee.md",
+            "health/morning-routine.md"
+          ],
+          "query": "How much money should I set aside for hotels, transport and food on the Kyoto vacation?"
+        },
+        {
+          "expected": [
+            "osaka-plan.md"
+          ],
+          "hits": [
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "finance/expense-receipts.md",
+            "health/morning-routine.md",
+            "engineering/queue-priority.md",
+            "health/hydration.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "Where do we eat and what should we visit in Osaka?"
+        },
+        {
+          "expected": [
+            "invoice-approval.md"
+          ],
+          "hits": [
+            "finance/invoice-approval.md",
+            "lookup-a.md",
+            "finance/monthly-close.md",
+            "finance/expense-receipts.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "Who must sign off on a costly supplier bill?"
+        },
+        {
+          "expected": [
+            "sleep-notes.md"
+          ],
+          "hits": [
+            "health/sleep-notes.md",
+            "health/hydration.md",
+            "health/morning-routine.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-weather.md",
+            "engineering/queue-priority.md",
+            "food/pizza-dough.md",
+            "finance/savings-plan.md",
+            "travel/osaka-plan.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "Ways to get better rest at night"
+        },
+        {
+          "expected": [
+            "sourdough.md"
+          ],
+          "hits": [
+            "food/sourdough.md",
+            "food/pizza-dough.md",
+            "food/coffee.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "health/hydration.md",
+            "security/key-rotation.md",
+            "engineering/schema-backup.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "How do I feed the culture used to make fermented bread?"
+        },
+        {
+          "expected": [
+            "key-rotation.md"
+          ],
+          "hits": [
+            "security/key-rotation.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "engineering/database-migration.md",
+            "engineering/timeout-policy.md",
+            "finance/expense-receipts.md",
+            "finance/savings-plan.md"
+          ],
+          "query": "What steps protect a service after replacing its access token?"
+        },
+        {
+          "expected": [
+            "timeout-policy.md"
+          ],
+          "hits": [
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "security/key-rotation.md",
+            "food/coffee.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md"
+          ],
+          "query": "What maximum wait is allowed for one web request?"
+        },
+        {
+          "expected": [
+            "schema-backup.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "engineering/retry-policy.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "lookup-a.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "How do we restore the database if a schema deployment goes wrong?"
+        },
+        {
+          "expected": [
+            "tokyo-budget.md"
+          ],
+          "hits": [
+            "travel/tokyo-budget.md",
+            "travel/kyoto-budget.md",
+            "travel/osaka-plan.md",
+            "finance/expense-receipts.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-weather.md",
+            "lookup-b.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md",
+            "food/coffee.md"
+          ],
+          "query": "How much will the Tokyo hotel, trains and restaurants cost?"
+        },
+        {
+          "expected": [
+            "osaka-hotel.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "travel/osaka-plan.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "finance/savings-plan.md",
+            "health/morning-routine.md"
+          ],
+          "query": "Which neighborhood hotel has simple airport access in Osaka?"
+        },
+        {
+          "expected": [
+            "expense-receipts.md"
+          ],
+          "hits": [
+            "finance/expense-receipts.md",
+            "finance/invoice-approval.md",
+            "finance/monthly-close.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "engineering/database-migration.md",
+            "finance/savings-plan.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "security/key-rotation.md"
+          ],
+          "query": "When do staff need to file purchase receipts to get paid back?"
+        },
+        {
+          "expected": [
+            "morning-routine.md"
+          ],
+          "hits": [
+            "health/morning-routine.md",
+            "health/sleep-notes.md",
+            "health/hydration.md",
+            "finance/savings-plan.md",
+            "security/key-rotation.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "security/passwords.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-plan.md"
+          ],
+          "query": "What daily habit can help me feel more alert after waking?"
+        },
+        {
+          "expected": [
+            "pizza-dough.md"
+          ],
+          "hits": [
+            "food/pizza-dough.md",
+            "food/sourdough.md",
+            "food/coffee.md",
+            "engineering/schema-backup.md",
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "security/passwords.md",
+            "finance/savings-plan.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "How should I leave yeast dough to rise for pizza?"
+        },
+        {
+          "expected": [
+            "passwords.md"
+          ],
+          "hits": [
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "security/tls-certificates.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/queue-priority.md",
+            "finance/savings-plan.md",
+            "engineering/retry-policy.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "How can I create different strong logins for every website?"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "finance/invoice-approval.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "engineering/database-migration.md",
+            "engineering/code-review.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "INV-2041"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/retry-policy.md",
+            "engineering/code-review.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "K7Q2LM"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-a.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "finance/expense-receipts.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "retryHandler"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "finance/invoice-approval.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "security/key-rotation.md"
+          ],
+          "query": "청구서 승인"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "lookup-a.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "데이터베이스 재시도"
+        }
+      ],
+      "recall_at_k": 1.0,
+      "variant": "rrf"
+    },
+    {
+      "mrr_at_k": 0.7238095238095238,
+      "ndcg_at_k": 0.7576462772152558,
+      "p50_search_ms": 0.33579200000000003,
+      "p95_search_ms": 0.524792,
+      "queries": [
+        {
+          "expected": [
+            "retry-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "security/passwords.md",
+            "security/tls-certificates.md",
+            "food/pizza-dough.md",
+            "finance/invoice-approval.md",
+            "engineering/schema-backup.md",
+            "engineering/timeout-policy.md",
+            "travel/kyoto-weather.md"
+          ],
+          "query": "How long does a failed task wait before it retries again?"
+        },
+        {
+          "expected": [
+            "database-migration.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "What is the procedure for safely changing a production database schema?"
+        },
+        {
+          "expected": [
+            "kyoto-budget.md"
+          ],
+          "hits": [
+            "finance/savings-plan.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-hotel.md",
+            "travel/osaka-plan.md",
+            "travel/kyoto-budget.md"
+          ],
+          "query": "How much money should I set aside for hotels, transport and food on the Kyoto vacation?"
+        },
+        {
+          "expected": [
+            "osaka-plan.md"
+          ],
+          "hits": [
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-budget.md"
+          ],
+          "query": "Where do we eat and what should we visit in Osaka?"
+        },
+        {
+          "expected": [
+            "invoice-approval.md"
+          ],
+          "hits": [],
+          "query": "Who must sign off on a costly supplier bill?"
+        },
+        {
+          "expected": [
+            "sleep-notes.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "travel/osaka-hotel.md"
+          ],
+          "query": "Ways to get better rest at night"
+        },
+        {
+          "expected": [
+            "sourdough.md"
+          ],
+          "hits": [
+            "food/sourdough.md"
+          ],
+          "query": "How do I feed the culture used to make fermented bread?"
+        },
+        {
+          "expected": [
+            "key-rotation.md"
+          ],
+          "hits": [
+            "finance/savings-plan.md",
+            "security/key-rotation.md",
+            "health/hydration.md",
+            "health/morning-routine.md",
+            "engineering/database-migration.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "What steps protect a service after replacing its access token?"
+        },
+        {
+          "expected": [
+            "timeout-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/code-review.md"
+          ],
+          "query": "What maximum wait is allowed for one web request?"
+        },
+        {
+          "expected": [
+            "schema-backup.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md"
+          ],
+          "query": "How do we restore the database if a schema deployment goes wrong?"
+        },
+        {
+          "expected": [
+            "tokyo-budget.md"
+          ],
+          "hits": [
+            "travel/tokyo-budget.md",
+            "travel/kyoto-budget.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "How much will the Tokyo hotel, trains and restaurants cost?"
+        },
+        {
+          "expected": [
+            "osaka-hotel.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "finance/savings-plan.md",
+            "travel/osaka-plan.md",
+            "travel/kyoto-budget.md"
+          ],
+          "query": "Which neighborhood hotel has simple airport access in Osaka?"
+        },
+        {
+          "expected": [
+            "expense-receipts.md"
+          ],
+          "hits": [
+            "finance/expense-receipts.md",
+            "finance/invoice-approval.md",
+            "engineering/database-migration.md",
+            "engineering/retry-policy.md",
+            "engineering/schema-backup.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "When do staff need to file purchase receipts to get paid back?"
+        },
+        {
+          "expected": [
+            "morning-routine.md"
+          ],
+          "hits": [
+            "health/hydration.md",
+            "health/morning-routine.md",
+            "health/sleep-notes.md",
+            "finance/savings-plan.md",
+            "engineering/database-migration.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "What daily habit can help me feel more alert after waking?"
+        },
+        {
+          "expected": [
+            "pizza-dough.md"
+          ],
+          "hits": [
+            "food/pizza-dough.md",
+            "food/sourdough.md"
+          ],
+          "query": "How should I leave yeast dough to rise for pizza?"
+        },
+        {
+          "expected": [
+            "passwords.md"
+          ],
+          "hits": [
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "food/coffee.md"
+          ],
+          "query": "How can I create different strong logins for every website?"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md"
+          ],
+          "query": "INV-2041"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md"
+          ],
+          "query": "K7Q2LM"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md"
+          ],
+          "query": "retryHandler"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md"
+          ],
+          "query": "청구서 승인"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md"
+          ],
+          "query": "데이터베이스 재시도"
+        }
+      ],
+      "recall_at_k": 0.8571428571428571,
+      "variant": "lexical"
+    },
+    {
+      "mrr_at_k": 0.9047619047619048,
+      "ndcg_at_k": 0.9297009054421824,
+      "p50_search_ms": 0.410833,
+      "p95_search_ms": 0.553542,
+      "queries": [
+        {
+          "expected": [
+            "retry-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "food/pizza-dough.md",
+            "finance/invoice-approval.md",
+            "lookup-a.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "How long does a failed task wait before it retries again?"
+        },
+        {
+          "expected": [
+            "database-migration.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "lookup-a.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "What is the procedure for safely changing a production database schema?"
+        },
+        {
+          "expected": [
+            "kyoto-budget.md"
+          ],
+          "hits": [
+            "travel/kyoto-budget.md",
+            "finance/savings-plan.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-plan.md",
+            "travel/tokyo-budget.md",
+            "travel/osaka-hotel.md",
+            "finance/expense-receipts.md",
+            "lookup-b.md",
+            "food/coffee.md",
+            "health/morning-routine.md"
+          ],
+          "query": "How much money should I set aside for hotels, transport and food on the Kyoto vacation?"
+        },
+        {
+          "expected": [
+            "osaka-plan.md"
+          ],
+          "hits": [
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "finance/expense-receipts.md",
+            "health/morning-routine.md",
+            "engineering/queue-priority.md",
+            "health/hydration.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "Where do we eat and what should we visit in Osaka?"
+        },
+        {
+          "expected": [
+            "invoice-approval.md"
+          ],
+          "hits": [
+            "finance/invoice-approval.md",
+            "lookup-a.md",
+            "finance/monthly-close.md",
+            "finance/expense-receipts.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "Who must sign off on a costly supplier bill?"
+        },
+        {
+          "expected": [
+            "sleep-notes.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "health/sleep-notes.md",
+            "engineering/schema-backup.md",
+            "health/hydration.md",
+            "health/morning-routine.md",
+            "travel/kyoto-weather.md",
+            "engineering/queue-priority.md",
+            "food/pizza-dough.md",
+            "finance/savings-plan.md",
+            "travel/osaka-plan.md"
+          ],
+          "query": "Ways to get better rest at night"
+        },
+        {
+          "expected": [
+            "sourdough.md"
+          ],
+          "hits": [
+            "food/sourdough.md",
+            "food/pizza-dough.md",
+            "food/coffee.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "health/hydration.md",
+            "security/key-rotation.md",
+            "engineering/schema-backup.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "How do I feed the culture used to make fermented bread?"
+        },
+        {
+          "expected": [
+            "key-rotation.md"
+          ],
+          "hits": [
+            "finance/savings-plan.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "engineering/timeout-policy.md",
+            "security/tls-certificates.md",
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "health/hydration.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md"
+          ],
+          "query": "What steps protect a service after replacing its access token?"
+        },
+        {
+          "expected": [
+            "timeout-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "engineering/code-review.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "security/key-rotation.md",
+            "food/coffee.md",
+            "security/passwords.md"
+          ],
+          "query": "What maximum wait is allowed for one web request?"
+        },
+        {
+          "expected": [
+            "schema-backup.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "engineering/retry-policy.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "lookup-a.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "How do we restore the database if a schema deployment goes wrong?"
+        },
+        {
+          "expected": [
+            "tokyo-budget.md"
+          ],
+          "hits": [
+            "travel/tokyo-budget.md",
+            "travel/kyoto-budget.md",
+            "finance/expense-receipts.md",
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-weather.md",
+            "lookup-b.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md",
+            "food/coffee.md"
+          ],
+          "query": "How much will the Tokyo hotel, trains and restaurants cost?"
+        },
+        {
+          "expected": [
+            "osaka-hotel.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "travel/osaka-plan.md",
+            "travel/kyoto-budget.md",
+            "finance/savings-plan.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "health/morning-routine.md"
+          ],
+          "query": "Which neighborhood hotel has simple airport access in Osaka?"
+        },
+        {
+          "expected": [
+            "expense-receipts.md"
+          ],
+          "hits": [
+            "finance/expense-receipts.md",
+            "finance/invoice-approval.md",
+            "engineering/database-migration.md",
+            "engineering/schema-backup.md",
+            "finance/monthly-close.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "finance/savings-plan.md"
+          ],
+          "query": "When do staff need to file purchase receipts to get paid back?"
+        },
+        {
+          "expected": [
+            "morning-routine.md"
+          ],
+          "hits": [
+            "health/morning-routine.md",
+            "health/hydration.md",
+            "health/sleep-notes.md",
+            "finance/savings-plan.md",
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "engineering/database-migration.md",
+            "security/key-rotation.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "What daily habit can help me feel more alert after waking?"
+        },
+        {
+          "expected": [
+            "pizza-dough.md"
+          ],
+          "hits": [
+            "food/pizza-dough.md",
+            "food/sourdough.md",
+            "food/coffee.md",
+            "engineering/schema-backup.md",
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "security/passwords.md",
+            "finance/savings-plan.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "How should I leave yeast dough to rise for pizza?"
+        },
+        {
+          "expected": [
+            "passwords.md"
+          ],
+          "hits": [
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "food/coffee.md",
+            "security/tls-certificates.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/queue-priority.md",
+            "finance/savings-plan.md",
+            "engineering/retry-policy.md"
+          ],
+          "query": "How can I create different strong logins for every website?"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "finance/invoice-approval.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "engineering/database-migration.md",
+            "engineering/code-review.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "INV-2041"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/retry-policy.md",
+            "engineering/code-review.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "K7Q2LM"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "finance/expense-receipts.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "retryHandler"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "finance/invoice-approval.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "security/key-rotation.md"
+          ],
+          "query": "청구서 승인"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "데이터베이스 재시도"
+        }
+      ],
+      "recall_at_k": 1.0,
+      "variant": "fts_cosine"
+    },
+    {
+      "mrr_at_k": 0.9047619047619048,
+      "ndcg_at_k": 0.9297009054421824,
+      "p50_search_ms": 0.415333,
+      "p95_search_ms": 0.5689580000000001,
+      "queries": [
+        {
+          "expected": [
+            "retry-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "food/pizza-dough.md",
+            "finance/invoice-approval.md",
+            "lookup-a.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "How long does a failed task wait before it retries again?"
+        },
+        {
+          "expected": [
+            "database-migration.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "lookup-a.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "What is the procedure for safely changing a production database schema?"
+        },
+        {
+          "expected": [
+            "kyoto-budget.md"
+          ],
+          "hits": [
+            "travel/kyoto-budget.md",
+            "finance/savings-plan.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-plan.md",
+            "travel/tokyo-budget.md",
+            "travel/osaka-hotel.md",
+            "finance/expense-receipts.md",
+            "lookup-b.md",
+            "food/coffee.md",
+            "health/morning-routine.md"
+          ],
+          "query": "How much money should I set aside for hotels, transport and food on the Kyoto vacation?"
+        },
+        {
+          "expected": [
+            "osaka-plan.md"
+          ],
+          "hits": [
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "finance/expense-receipts.md",
+            "health/morning-routine.md",
+            "engineering/queue-priority.md",
+            "health/hydration.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "Where do we eat and what should we visit in Osaka?"
+        },
+        {
+          "expected": [
+            "invoice-approval.md"
+          ],
+          "hits": [
+            "finance/invoice-approval.md",
+            "lookup-a.md",
+            "finance/monthly-close.md",
+            "finance/expense-receipts.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "Who must sign off on a costly supplier bill?"
+        },
+        {
+          "expected": [
+            "sleep-notes.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "health/sleep-notes.md",
+            "engineering/schema-backup.md",
+            "health/hydration.md",
+            "health/morning-routine.md",
+            "travel/kyoto-weather.md",
+            "engineering/queue-priority.md",
+            "food/pizza-dough.md",
+            "finance/savings-plan.md",
+            "travel/osaka-plan.md"
+          ],
+          "query": "Ways to get better rest at night"
+        },
+        {
+          "expected": [
+            "sourdough.md"
+          ],
+          "hits": [
+            "food/sourdough.md",
+            "food/pizza-dough.md",
+            "food/coffee.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "health/hydration.md",
+            "security/key-rotation.md",
+            "engineering/schema-backup.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "How do I feed the culture used to make fermented bread?"
+        },
+        {
+          "expected": [
+            "key-rotation.md"
+          ],
+          "hits": [
+            "finance/savings-plan.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "engineering/timeout-policy.md",
+            "security/tls-certificates.md",
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "health/hydration.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md"
+          ],
+          "query": "What steps protect a service after replacing its access token?"
+        },
+        {
+          "expected": [
+            "timeout-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "engineering/code-review.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "security/key-rotation.md",
+            "food/coffee.md",
+            "security/passwords.md"
+          ],
+          "query": "What maximum wait is allowed for one web request?"
+        },
+        {
+          "expected": [
+            "schema-backup.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "engineering/retry-policy.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "lookup-a.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "How do we restore the database if a schema deployment goes wrong?"
+        },
+        {
+          "expected": [
+            "tokyo-budget.md"
+          ],
+          "hits": [
+            "travel/tokyo-budget.md",
+            "travel/kyoto-budget.md",
+            "finance/expense-receipts.md",
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-weather.md",
+            "lookup-b.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md",
+            "food/coffee.md"
+          ],
+          "query": "How much will the Tokyo hotel, trains and restaurants cost?"
+        },
+        {
+          "expected": [
+            "osaka-hotel.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "travel/osaka-plan.md",
+            "travel/kyoto-budget.md",
+            "finance/savings-plan.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "health/morning-routine.md"
+          ],
+          "query": "Which neighborhood hotel has simple airport access in Osaka?"
+        },
+        {
+          "expected": [
+            "expense-receipts.md"
+          ],
+          "hits": [
+            "finance/expense-receipts.md",
+            "finance/invoice-approval.md",
+            "engineering/database-migration.md",
+            "engineering/schema-backup.md",
+            "finance/monthly-close.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "finance/savings-plan.md"
+          ],
+          "query": "When do staff need to file purchase receipts to get paid back?"
+        },
+        {
+          "expected": [
+            "morning-routine.md"
+          ],
+          "hits": [
+            "health/morning-routine.md",
+            "health/hydration.md",
+            "health/sleep-notes.md",
+            "finance/savings-plan.md",
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "engineering/database-migration.md",
+            "security/key-rotation.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "What daily habit can help me feel more alert after waking?"
+        },
+        {
+          "expected": [
+            "pizza-dough.md"
+          ],
+          "hits": [
+            "food/pizza-dough.md",
+            "food/sourdough.md",
+            "food/coffee.md",
+            "engineering/schema-backup.md",
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "security/passwords.md",
+            "finance/savings-plan.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "How should I leave yeast dough to rise for pizza?"
+        },
+        {
+          "expected": [
+            "passwords.md"
+          ],
+          "hits": [
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "food/coffee.md",
+            "security/tls-certificates.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/queue-priority.md",
+            "finance/savings-plan.md",
+            "engineering/retry-policy.md"
+          ],
+          "query": "How can I create different strong logins for every website?"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "finance/invoice-approval.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "engineering/database-migration.md",
+            "engineering/code-review.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "INV-2041"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/retry-policy.md",
+            "engineering/code-review.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "K7Q2LM"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "finance/expense-receipts.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "retryHandler"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "finance/invoice-approval.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "security/key-rotation.md"
+          ],
+          "query": "청구서 승인"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "데이터베이스 재시도"
+        }
+      ],
+      "recall_at_k": 1.0,
+      "variant": "intent_cosine"
+    },
+    {
+      "mrr_at_k": 0.9761904761904762,
+      "ndcg_at_k": 0.9824252263605456,
+      "p50_search_ms": 0.41541700000000004,
+      "p95_search_ms": 0.5695830000000001,
+      "queries": [
+        {
+          "expected": [
+            "retry-policy.md"
+          ],
+          "hits": [
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "lookup-a.md",
+            "engineering/queue-priority.md",
+            "health/morning-routine.md",
+            "security/tls-certificates.md",
+            "lookup-b.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "How long does a failed task wait before it retries again?"
+        },
+        {
+          "expected": [
+            "database-migration.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "lookup-a.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "What is the procedure for safely changing a production database schema?"
+        },
+        {
+          "expected": [
+            "kyoto-budget.md"
+          ],
+          "hits": [
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "travel/osaka-plan.md",
+            "finance/savings-plan.md",
+            "finance/expense-receipts.md",
+            "travel/osaka-hotel.md",
+            "lookup-b.md",
+            "food/coffee.md",
+            "engineering/code-review.md"
+          ],
+          "query": "How much money should I set aside for hotels, transport and food on the Kyoto vacation?"
+        },
+        {
+          "expected": [
+            "osaka-plan.md"
+          ],
+          "hits": [
+            "travel/osaka-plan.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "finance/expense-receipts.md",
+            "health/morning-routine.md",
+            "engineering/code-review.md",
+            "engineering/database-migration.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "Where do we eat and what should we visit in Osaka?"
+        },
+        {
+          "expected": [
+            "invoice-approval.md"
+          ],
+          "hits": [
+            "finance/invoice-approval.md",
+            "lookup-a.md",
+            "finance/monthly-close.md",
+            "finance/expense-receipts.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md"
+          ],
+          "query": "Who must sign off on a costly supplier bill?"
+        },
+        {
+          "expected": [
+            "sleep-notes.md"
+          ],
+          "hits": [
+            "health/sleep-notes.md",
+            "travel/osaka-hotel.md",
+            "health/hydration.md",
+            "health/morning-routine.md",
+            "travel/kyoto-weather.md",
+            "engineering/queue-priority.md",
+            "food/pizza-dough.md",
+            "finance/savings-plan.md",
+            "travel/osaka-plan.md",
+            "engineering/schema-backup.md"
+          ],
+          "query": "Ways to get better rest at night"
+        },
+        {
+          "expected": [
+            "sourdough.md"
+          ],
+          "hits": [
+            "food/sourdough.md",
+            "food/pizza-dough.md",
+            "food/coffee.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "health/hydration.md",
+            "security/key-rotation.md",
+            "engineering/code-review.md",
+            "engineering/retry-policy.md"
+          ],
+          "query": "How do I feed the culture used to make fermented bread?"
+        },
+        {
+          "expected": [
+            "key-rotation.md"
+          ],
+          "hits": [
+            "security/key-rotation.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "engineering/timeout-policy.md",
+            "finance/savings-plan.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "What steps protect a service after replacing its access token?"
+        },
+        {
+          "expected": [
+            "timeout-policy.md"
+          ],
+          "hits": [
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "security/key-rotation.md",
+            "food/coffee.md",
+            "security/passwords.md",
+            "engineering/schema-backup.md"
+          ],
+          "query": "What maximum wait is allowed for one web request?"
+        },
+        {
+          "expected": [
+            "schema-backup.md"
+          ],
+          "hits": [
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "security/tls-certificates.md",
+            "engineering/retry-policy.md",
+            "security/key-rotation.md",
+            "security/passwords.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "lookup-a.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "How do we restore the database if a schema deployment goes wrong?"
+        },
+        {
+          "expected": [
+            "tokyo-budget.md"
+          ],
+          "hits": [
+            "travel/tokyo-budget.md",
+            "travel/kyoto-budget.md",
+            "travel/osaka-plan.md",
+            "finance/expense-receipts.md",
+            "travel/osaka-hotel.md",
+            "travel/kyoto-weather.md",
+            "lookup-b.md",
+            "finance/savings-plan.md",
+            "engineering/code-review.md",
+            "engineering/database-migration.md"
+          ],
+          "query": "How much will the Tokyo hotel, trains and restaurants cost?"
+        },
+        {
+          "expected": [
+            "osaka-hotel.md"
+          ],
+          "hits": [
+            "travel/osaka-hotel.md",
+            "travel/osaka-plan.md",
+            "travel/kyoto-budget.md",
+            "travel/tokyo-budget.md",
+            "travel/kyoto-weather.md",
+            "finance/savings-plan.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "engineering/code-review.md"
+          ],
+          "query": "Which neighborhood hotel has simple airport access in Osaka?"
+        },
+        {
+          "expected": [
+            "expense-receipts.md"
+          ],
+          "hits": [
+            "finance/expense-receipts.md",
+            "finance/invoice-approval.md",
+            "finance/monthly-close.md",
+            "lookup-b.md",
+            "lookup-a.md",
+            "engineering/database-migration.md",
+            "finance/savings-plan.md",
+            "engineering/queue-priority.md",
+            "engineering/code-review.md",
+            "engineering/schema-backup.md"
+          ],
+          "query": "When do staff need to file purchase receipts to get paid back?"
+        },
+        {
+          "expected": [
+            "morning-routine.md"
+          ],
+          "hits": [
+            "health/morning-routine.md",
+            "health/sleep-notes.md",
+            "health/hydration.md",
+            "finance/savings-plan.md",
+            "security/key-rotation.md",
+            "engineering/queue-priority.md",
+            "finance/monthly-close.md",
+            "engineering/database-migration.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md"
+          ],
+          "query": "What daily habit can help me feel more alert after waking?"
+        },
+        {
+          "expected": [
+            "pizza-dough.md"
+          ],
+          "hits": [
+            "food/pizza-dough.md",
+            "food/sourdough.md",
+            "food/coffee.md",
+            "engineering/schema-backup.md",
+            "engineering/timeout-policy.md",
+            "engineering/retry-policy.md",
+            "health/morning-routine.md",
+            "security/passwords.md",
+            "engineering/code-review.md",
+            "engineering/database-migration.md"
+          ],
+          "query": "How should I leave yeast dough to rise for pizza?"
+        },
+        {
+          "expected": [
+            "passwords.md"
+          ],
+          "hits": [
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "security/tls-certificates.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/queue-priority.md",
+            "finance/savings-plan.md",
+            "food/coffee.md",
+            "engineering/retry-policy.md"
+          ],
+          "query": "How can I create different strong logins for every website?"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "finance/invoice-approval.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "engineering/database-migration.md",
+            "engineering/code-review.md",
+            "engineering/timeout-policy.md",
+            "engineering/schema-backup.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "INV-2041"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "engineering/retry-policy.md",
+            "engineering/code-review.md",
+            "finance/savings-plan.md",
+            "finance/monthly-close.md"
+          ],
+          "query": "K7Q2LM"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "engineering/queue-priority.md",
+            "finance/expense-receipts.md",
+            "security/key-rotation.md",
+            "engineering/database-migration.md",
+            "security/passwords.md",
+            "security/tls-certificates.md"
+          ],
+          "query": "retryHandler"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "finance/invoice-approval.md",
+            "lookup-b.md",
+            "finance/expense-receipts.md",
+            "finance/monthly-close.md",
+            "security/tls-certificates.md",
+            "engineering/queue-priority.md",
+            "security/passwords.md",
+            "engineering/database-migration.md",
+            "security/key-rotation.md"
+          ],
+          "query": "청구서 승인"
+        },
+        {
+          "expected": [
+            "lookup-a.md"
+          ],
+          "hits": [
+            "lookup-a.md",
+            "engineering/schema-backup.md",
+            "engineering/database-migration.md",
+            "engineering/retry-policy.md",
+            "engineering/timeout-policy.md",
+            "lookup-b.md",
+            "security/tls-certificates.md",
+            "security/passwords.md",
+            "security/key-rotation.md",
+            "finance/expense-receipts.md"
+          ],
+          "query": "데이터베이스 재시도"
+        }
+      ],
+      "recall_at_k": 1.0,
+      "variant": "intent_zscore"
+    }
+  ],
+  "environment": {
+    "cpu": "Apple M4 Pro",
+    "os": "macOS 27.2",
+    "encoding": "Q8",
+    "dimension": 768,
+    "files": 26,
+    "chunks": 26
+  },
+  "fixture_corpus": [
+    "eval/corpus",
+    "eval/hybrid-corpus"
+  ],
+  "query_labels": "eval/hybrid-queries.json",
+  "snapshot_flush": {
+    "chunks": 5236,
+    "elapsed_ms": 21.59,
+    "snapshot_bytes": 4283812,
+    "peak_process_rss_mib": 19.2,
+    "method": "isolated backup; release test; no before/after comparison"
+  }
+}

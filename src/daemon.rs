@@ -265,13 +265,18 @@ impl DaemonServer {
                             "weft daemon: idle for {:?}. Running idle action before exit...",
                             self.idle_timeout
                         );
+                        // Stop accepting before indexing can wait on search
+                        // leases. A successor may bind this path during idle work.
+                        drop(listener);
+                        let _ = std::fs::remove_file(&self.socket_path);
                         if let Err(e) = on_idle() {
                             eprintln!("warning: idle indexing error: {e:#}");
                         }
                         eprintln!(
                             "weft daemon: idle action complete. Graceful auto-exit complete."
                         );
-                        break;
+                        // The socket path may now belong to a successor daemon.
+                        return Ok(());
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -301,6 +306,50 @@ impl DaemonServer {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn idle_action_allows_successor_bind_and_preserves_its_socket() -> Result<()> {
+        for fail_idle in [false, true] {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            // Keep below macOS's Unix socket path length limit.
+            let path = PathBuf::from(format!(
+                "/tmp/weft-idle-{}-{stamp}.sock",
+                std::process::id()
+            ));
+            let server = DaemonServer::new(path.clone(), Duration::ZERO);
+            let listener = server.bind()?;
+            let mut successor = None;
+            server.serve(
+                listener,
+                |_| anyhow::bail!("idle server must not embed"),
+                || {
+                    assert!(
+                        !path.exists(),
+                        "old socket must be unlinked before idle work"
+                    );
+                    assert!(UnixStream::connect(&path).is_err());
+                    successor = Some(DaemonServer::new(path.clone(), Duration::ZERO).bind()?);
+                    if fail_idle {
+                        anyhow::bail!("idle indexing failed after successor started");
+                    }
+                    Ok(())
+                },
+            )?;
+            assert!(
+                path.exists(),
+                "old daemon must not unlink the successor socket"
+            );
+            let client = UnixStream::connect(&path)?;
+            let accepted = successor.as_ref().unwrap().accept()?;
+            drop(accepted);
+            drop(client);
+            drop(successor);
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn exact_lru_reuses_results_evicts_old_entries_and_never_caches_failures() {
