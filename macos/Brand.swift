@@ -77,7 +77,7 @@ enum WeftTheme {
         }
         w.lineWidth = 9.5; w.lineCapStyle = .round; w.lineJoinStyle = .round
         NSGraphicsContext.saveGraphicsState()
-        mask([34 + 20 * 16 / 31, 66 + 20 * 14 / 52], radius: 7)
+        mask([34.0 + 20.0 * 16.0 / 31.0, 66.0 + 20.0 * 14.0 / 52.0], radius: 7)
         w.stroke()
         NSGraphicsContext.restoreGraphicsState()
 
@@ -85,7 +85,7 @@ enum WeftTheme {
         weft.move(to: NSPoint(x: 14, y: weftY)); weft.line(to: NSPoint(x: 86, y: weftY))
         weft.lineWidth = 5.5; weft.lineCapStyle = .round
         NSGraphicsContext.saveGraphicsState()
-        mask([20 + 32 * 14 / 52, 50 + 11 * 16 / 31], radius: 7.5)
+        mask([20.0 + 32.0 * 14.0 / 52.0, 50.0 + 11.0 * 16.0 / 31.0], radius: 7.5)
         weft.stroke()
         NSGraphicsContext.restoreGraphicsState()
     }
